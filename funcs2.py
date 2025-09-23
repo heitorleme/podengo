@@ -817,6 +817,135 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
     except Exception as e:
         return f"[ERRO descrição frames] {e}"
 
+# ─────────────────────────────────────────────────────────────
+# Transcrição em paralelo (threads) + descrição de frames
+# ─────────────────────────────────────────────────────────────
+def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore):
+    """
+    Transcreve vídeo/imag. usando arquivo local (em ./media) e retorna:
+      (idx, transcricao:str|None, base64Frames:list[str], framesDescricao:str|None, erro:str|None)
+    """
+    if not media_url:
+        return idx, None, [], None, "sem_media_url"
+
+    try:
+        base_dir = Path(media)
+
+        def _is_url(s: str) -> bool:
+            return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
+
+        def _resolve_local_path(s: str) -> Path:
+            if _is_url(s):
+                path = urlsplit(s).path
+                name = unquote(os.path.basename(path)) or "mediafile"
+            else:
+                name = s
+            p = Path(name)
+            return p if p.is_absolute() else (base_dir / name)
+
+        local_path = _resolve_local_path(media_url)
+        if not local_path.exists():
+            return idx, None, [], None, f"FileNotFoundError: {local_path}"
+
+        ext = local_path.suffix.lower()
+        is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
+        is_image = ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+        texto: Optional[str] = None
+        base64_frames: List[str] = []
+        frames_descricao: Optional[str] = None
+
+        if is_video:
+            tlog(f"[TR] 🎙️ idx={idx}: transcrição {local_path.name}")
+            # 1) transcrição de áudio (serializada pelo semáforo)
+            with sem:
+                try:
+                    _t0 = time.time()
+                    texto = transcrever_video_em_speed(str(local_path))
+                    tlog(f"[TR] ✅ idx={idx}: {local_path.name} em {time.time()-_t0:.1f}s")
+                except Exception as e:
+                    tlog(f"[TR] ❌ idx={idx}: {local_path.name}: {e}")
+                    raise
+            # 2) frames
+            try:
+                base64_frames = get_video_frames(str(local_path), every_nth=60)
+            except Exception as fe:
+                tlog(f"[frames] erro extraindo frames de {local_path}: {fe}")
+                base64_frames = []
+            # 3) descrição dos frames
+            if base64_frames:
+                frames_descricao = _descrever_frames(base64_frames)
+
+        elif is_image:
+            with open(local_path, "rb") as img:
+                base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
+            frames_descricao = _descrever_frames(base64_frames)
+
+        return idx, texto, base64_frames, frames_descricao, None
+
+    except Exception as e:
+        return idx, None, [], None, f"{type(e).__name__}: {e}"
+
+def anexar_transcricoes_threaded(
+    resultados: List[Dict[str, Any]],
+    max_workers: int = 4,
+    gpu_singleton: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Para cada item com mídia local, transcreve (vídeo) e descreve frames em paralelo.
+    Mantém campos existentes vindos do Mongo; só preenche se houver conteúdo novo.
+    """
+    if not resultados:
+        return resultados
+
+    sem = threading.Semaphore(1 if gpu_singleton else max_workers)
+
+    jobs: List[Tuple[int, Optional[str]]] = []
+    for idx, item in enumerate(resultados):
+        veio_mongo = bool(item.get("_from_mongo"))
+
+        # Se já tem transcrição/frames do Mongo, não reprocessa
+        if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
+            item.setdefault("base64Frames", [])
+            continue
+
+        url_media = _pick_media_url(
+            item.get("mediaUrl"),
+            item.get("mediaLocalPath"),
+            item.get("mediaLocalPaths"),
+        )
+        if url_media:
+            jobs.append((idx, url_media))
+        else:
+            # Sem media → marque erro mínimo somente se não houver nada preenchido
+            if item.get("transcricao") is None and item.get("framesDescricao") is None:
+                item.setdefault("base64Frames", [])
+                item["transcricao"] = None
+                item["transcricao_erro"] = "sem_media_url"
+                item["framesDescricao"] = None
+
+    if not jobs:
+        return resultados
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_thread_worker, idx, url, sem) for idx, url in jobs]
+        for fut in as_completed(futs):
+            idx, transcricao, frames, frames_desc, erro = fut.result()
+
+            if transcricao is not None:
+                resultados[idx]["transcricao"] = transcricao
+            if frames is not None:
+                resultados[idx]["base64Frames"] = frames
+            if frames_desc is not None:
+                resultados[idx]["framesDescricao"] = frames_desc
+
+            if erro:
+                resultados[idx]["transcricao_erro"] = erro
+            else:
+                resultados[idx].pop("transcricao_erro", None)
+
+    return resultados
+
 def _coletar_caminhos_midia(resultados: List[dict]) -> Set[Path]:
     paths: Set[Path] = set()
     def _add(p):
@@ -920,3 +1049,4 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
