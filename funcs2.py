@@ -14,7 +14,7 @@ import hashlib
 import warnings
 
 import pydantic; print(pydantic.__version__)
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Any
 from openai import OpenAI
@@ -37,7 +37,7 @@ import random
 
 import tiktoken
 
-from typing import List, Tuple, Set, Iterable
+from typing import List, Tuple, Set, Iterable, Optional
 from apify_client import ApifyClient
 import time
 
@@ -64,7 +64,7 @@ import threading
 import re
 from math import ceil
 import requests
-
+from loguru import logger
 from datetime import datetime
 
 # Log thread-safe com timestamp
@@ -79,46 +79,116 @@ def tlog(msg: str) -> None:
 from openai import AsyncOpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
+# 🔑 Chaves obrigatórias (nomes exatos que você usará em st.secrets ou variáveis de ambiente)
+REQUIRED_KEYS = [
+    "APIFY_KEY",
+    "OPENAI_API_KEY",
+    "MONGO_HOST",
+    "MONGO_PORT",
+    "MONGO_USER",
+    "MONGO_PASSWORD",
+    "MONGO_DB_NAME",
+]
+
 BASE_DIR = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env.txt"),
+        env_file=str(BASE_DIR / ".env.txt"),  # opcional: se existir localmente, será lido
         env_file_encoding="utf-8",
+        extra="ignore",  # ignore chaves desconhecidas
     )
-    RAPID_KEY: str | None = None
-    APIFY_KEY: SecretStr = Field(..., description="Obrigatória")  # <=== obrigatória
-    OPENAI_API_KEY: SecretStr = Field(..., description="Obrigatória")
+
+    # --- Campos ---
+    RAPID_KEY: Optional[str] = None
+    APIFY_KEY: SecretStr
+    OPENAI_API_KEY: SecretStr
     OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
     OPENAI_TRANSCRIBE_MODEL: str = "whisper-1"
-    MONGO_HOST: SecretStr = Field(...)
-    MONGO_PORT: SecretStr = Field(...)
-    MONGO_USER: SecretStr = Field(...)
-    MONGO_PASSWORD: SecretStr = Field(...)
-    MONGO_DB_NAME: SecretStr = Field(...)
 
-        # 🔑 converte SecretStr para str logo após inicialização
-    def __init__(self, **data):
-        super().__init__(**data)
-        # MongoDB
-        self.MONGO_HOST = self.MONGO_HOST.get_secret_value()
-        self.MONGO_PORT = int(self.MONGO_PORT.get_secret_value())
-        self.MONGO_USER = self.MONGO_USER.get_secret_value()
-        self.MONGO_PASSWORD = self.MONGO_PASSWORD.get_secret_value()
-        self.MONGO_DB_NAME = self.MONGO_DB_NAME.get_secret_value()
+    # Mongo (tipos corretos já ajudam o pydantic a fazer cast)
+    MONGO_HOST: str
+    MONGO_PORT: int
+    MONGO_USER: str
+    MONGO_PASSWORD: str
+    MONGO_DB_NAME: str
 
-        # APIs
-        self.APIFY_KEY = self.APIFY_KEY.get_secret_value()
-        self.OPENAI_API_KEY = self.OPENAI_API_KEY.get_secret_value()
+    # 🔑 pós-init: nada a fazer; SecretStr já virou str via tipos acima
+    # (Se preferir manter SecretStr, converta aqui como você fazia.)
 
-settings = Settings()
+# ─────────────────────────────────────────────────────────────
+# Loader preguiçoso que junta st.secrets + os.environ e cria Settings()
+# ─────────────────────────────────────────────────────────────
+_settings_cache: Optional[Settings] = None
 
-assert settings.APIFY_KEY, "APIFY_KEY ausente no .env.txt"
-assert settings.OPENAI_API_KEY, "OPENAI_API_KEY ausente no .env.txt"
+def get_settings() -> Settings:
+    global _settings_cache
+    if _settings_cache is not None:
+        return _settings_cache
 
-from apify_client import ApifyClient
-apify_client = ApifyClient(settings.APIFY_KEY)
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    # 1) comece com o ambiente
+    env = dict(os.environ)
+
+    # 2) mescle st.secrets se existir (Streamlit Cloud)
+    try:
+        import streamlit as st  # só vai existir dentro do app
+        if hasattr(st, "secrets"):
+            for k, v in st.secrets.items():
+                # garanta que vira string para o BaseSettings
+                env.setdefault(k, str(v))
+    except Exception:
+        pass
+
+    # 3) valide presença de obrigatórios para mensagem mais amigável
+    missing = [k for k in REQUIRED_KEYS if not env.get(k)]
+    if missing:
+        msg = (
+            "Configuração ausente. Defina as chaves obrigatórias nas **App secrets** do Streamlit Cloud "
+            "ou como variáveis de ambiente:\n  - " + "\n  - ".join(missing) +
+            "\n\nNo Streamlit Cloud: Menu ▸ Manage app ▸ Settings ▸ Secrets.\n"
+            "Exemplo de `secrets.toml` local:\n"
+            "[[EXEMPLO]]\n"
+            "APIFY_KEY = \"...\"\nOPENAI_API_KEY = \"...\"\nMONGO_HOST = \"...\"\n"
+            "MONGO_PORT = \"27017\"\nMONGO_USER = \"...\"\nMONGO_PASSWORD = \"...\"\nMONGO_DB_NAME = \"...\"\n"
+        )
+        # Levante erro claro (Streamlit vai exibir)
+        raise RuntimeError(msg)
+
+    try:
+        # 4) instancie Settings (deixa o pydantic fazer casts/validações)
+        _settings_cache = Settings(**{k: env[k] for k in env if k.upper() in set(REQUIRED_KEYS + [
+            "RAPID_KEY","OPENAI_CHAT_MODEL","OPENAI_TRANSCRIBE_MODEL"
+        ])})
+        return _settings_cache
+    except ValidationError as e:
+        raise RuntimeError(f"Falha ao validar configurações: {e}") from e
+
+# ─────────────────────────────────────────────────────────────
+# Clientes preguiçosos (só criados quando usados)
+# ─────────────────────────────────────────────────────────────
+_apify_client = None
+_openai_sync = None
+_openai_async = None
+
+def get_clients():
+    global _apify_client, _openai_sync, _openai_async
+    s = get_settings()
+
+    if _apify_client is None:
+        from apify_client import ApifyClient
+        _apify_client = ApifyClient(s.APIFY_KEY)
+
+    if _openai_sync is None:
+        from openai import OpenAI
+        _openai_sync = OpenAI(api_key=s.OPENAI_API_KEY)
+
+    if _openai_async is None:
+        from openai import AsyncOpenAI
+        _openai_async = AsyncOpenAI(api_key=s.OPENAI_API_KEY)
+
+    return _apify_client, _openai_sync, _openai_async
+
+apify_client, client, async_client = get_clients()
 
 media = r"./media"
 
@@ -1217,3 +1287,4 @@ async def rodar_pipeline(urls: list[str]) -> list[dict]:
 
 
     return resultados
+
