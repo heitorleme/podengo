@@ -136,5 +136,3 @@ if st.button("▶️ Executar pipeline e gerar Excel", type="primary", disabled=
         if stderr_txt:
             with st.expander("⚠️ Erros/alertas (stderr)"):
                 st.code(stderr_txt)
-
-st.caption("Dica: `streamlit run streamlit_app.py`")
