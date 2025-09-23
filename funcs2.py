@@ -5,7 +5,10 @@ from pymongo import MongoClient
 
 import cv2
 import base64
-import whisper
+try:
+    import whisper  # opcional, só se você realmente for usar o modelo local
+except Exception:
+    whisper = None
 import hashlib
 
 import warnings
@@ -1211,5 +1214,6 @@ async def rodar_pipeline(urls: list[str]) -> list[dict]:
     caminhos = _coletar_caminhos_midia(resultados)
     _deletar_arquivos(caminhos)
     _deletar_pasta_se_vazia(Path(media))  # remove ../media se ficar vazia
+
 
     return resultados
