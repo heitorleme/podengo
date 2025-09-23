@@ -31,8 +31,8 @@ opencv-python-headless>=4.9.0.80  # versão headless (dispensa GUI)
 filetype>=1.2.0
 
 # --- Áudio / vídeo ---
-whisper @ git+https://github.com/openai/whisper.git  # Whisper oficial
 ffmpeg-python>=0.2.0                                # wrapper opcional p/ ffmpeg (não estritamente obrigatório)
 
 # --- Outras libs úteis ---
+
 python-dotenv>=1.0.0     # se quiser ler .env (pydantic já ajuda, mas útil)
