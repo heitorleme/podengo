@@ -227,14 +227,27 @@ def _load_docs_by_urls(urls: List[str], fields: List[str] = MONGO_FIELDS) -> Dic
 #                  CONEXÃO AO MONGO                        #
 # ---------------------------------------------------------#
 
-def _connect_to_mongo(HOST=settings.MONGO_HOST, PORT=settings.MONGO_PORT, USERNAME=settings.MONGO_USER, PASSWORD = settings.MONGO_PASSWORD, DATABASE=settings.MONGO_DB_NAME):
+def _connect_to_mongo(
+    HOST: str | None = None,
+    PORT: int | None = None,
+    USERNAME: str | None = None,
+    PASSWORD: str | None = None,
+    DATABASE: str | None = None,
+):
     try:
-        client_mongo = MongoClient(HOST, PORT, USERNAME=USERNAME, PASSWORD=PASSWORD)
-        db = client_mongo[DATABASE]
-        logger.info(f"Connected to MongoDB: {DATABASE}")
+        s = get_settings()
+        host = HOST or s.MONGO_HOST
+        port = PORT or s.MONGO_PORT
+        user = USERNAME or s.MONGO_USER
+        pwd  = PASSWORD or s.MONGO_PASSWORD
+        dbname = DATABASE or s.MONGO_DB_NAME
+
+        client_mongo = MongoClient(host, port, username=user, password=pwd)
+        db = client_mongo[dbname]
+        logger.info(f"Connected to MongoDB: {dbname}")
         return db
     except Exception as e:
-        logger.error(f"Erro connecting to MongoDB: {e}")
+        logger.error(f"Erro conectando ao MongoDB: {e}")
         return None
 
 def _upload_para_mongo(resultado: dict):
@@ -1287,4 +1300,5 @@ async def rodar_pipeline(urls: list[str]) -> list[dict]:
 
 
     return resultados
+
 
