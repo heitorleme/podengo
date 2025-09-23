@@ -321,8 +321,7 @@ def upload_muitos_para_mongo(resultados: list[dict]) -> dict:
 # ---------------------------------------------------------#
 class AudioModel:
     """Wrapper mínimo para transcrição Whisper (openai v1.x)."""
-
-    def __init__(self, model: str = settings.OPENAI_TRANSCRIBE_MODEL):
+    def __init__(self, model: str = s.OPENAI_TRANSCRIBE_MODEL):
         self.model = model
 
     def transcribe(self, file_path: str) -> dict:
@@ -505,7 +504,7 @@ def transcrever_video_em_speed(
         except Exception:
             pass
 
-apify_client = ApifyClient(settings.APIFY_KEY)
+apify_client = ApifyClient(s.APIFY_KEY)
 
 INSTAGRAM_ACTOR = "apify/instagram-scraper"            # Instagram
 TIKTOK_ACTOR    = "clockworks/tiktok-scraper"  # TikTok
@@ -964,7 +963,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
 # ────────────────── RETURN ────────────────────
 async def fetch_social_post_summary_async(
     post_url: List[str],
-    api_token: str = settings.APIFY_KEY,
+    api_token: str = s.APIFY_KEY,
     max_results: int = 1000,
 ) -> List[Dict[str, Optional[str]]]:
 
@@ -1082,7 +1081,7 @@ def _descrever_frames(frames_b64: list[str], max_imgs: int = 5, idioma: str = "p
         ]
 
         resp = client.chat.completions.create(
-            model=settings.OPENAI_CHAT_MODEL,
+            model=s.OPENAI_CHAT_MODEL,
             messages=mensagens
         )
         return (resp.choices[0].message.content or "").strip()
@@ -1284,7 +1283,7 @@ async def rodar_pipeline(urls: list[str]) -> list[dict]:
         return []
 
     # 1) Buscar/baixar via Apify
-    resultados = await fetch_social_post_summary_async(urls, api_token=settings.APIFY_KEY, max_results=1000)
+    resultados = await fetch_social_post_summary_async(urls, api_token=s.APIFY_KEY, max_results=1000)
     if not resultados:
         print("Nenhum resultado retornado pelos scrapers.")
         return []
@@ -1300,5 +1299,6 @@ async def rodar_pipeline(urls: list[str]) -> list[dict]:
 
 
     return resultados
+
 
 
