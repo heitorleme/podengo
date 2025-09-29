@@ -402,6 +402,32 @@ INSTAGRAM_ACTOR = "apify/instagram-scraper"
 TIKTOK_ACTOR    = "clockworks/tiktok-scraper"
 POLL_SEC = 2  # polling em segundos
 
+def _normalize_url(u: Optional[str]) -> Optional[str]:
+    if not u:
+        return None
+    p = urlparse(u)
+    # remove query/fragment e barra final
+    path = p.path.rstrip("/")
+    return urlunparse((p.scheme.lower(), p.netloc.lower(), path, "", "", ""))
+
+def _post_identity(u: Optional[str]) -> Optional[Tuple[str, str]]:
+    """
+    Retorna uma identidade canônica para merge:
+      ("ig", <shortcode>) | ("tt", <video_id>) | ("url", <normalized_url>)
+    """
+    if not u:
+        return None
+    if "instagram.com" in u:
+        sc = _shortcode(u)
+        if sc:
+            return ("ig", sc)
+    if "tiktok.com" in u:
+        vid = _tt_id(u)
+        if vid:
+            return ("tt", vid)
+    nu = _normalize_url(u)
+    return ("url", nu) if nu else None
+
 def _shortcode(u: str) -> Optional[str]:
     m = re.search(r"instagram\.com/(?:reel|p)/([^/?#]+)", u, re.I)
     return m.group(1) if m else None
@@ -540,7 +566,8 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                             except Exception as e:
                                 tlog(f"[IG] ⚠️ Falha ao baixar {mu}: {e}")
                         out.append({
-                            "url": it.get("inputUrl") or it.get("url"),
+                            "urlOriginal": it.get("inputUrl") or _any_post_url(it),
+                            "urlCanonica": it.get("url") or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
@@ -701,7 +728,8 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
             _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
             out.append({
-                "url": _any_post_url(it) or it.get("webVideoUrl") or it.get("url"),
+                "urlOriginal": it.get("inputUrl") or _any_post_url(it),
+                "urlCanonica": it.get("url") or _any_post_url(it),
                 "ownerUsername": ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId"),
                 "likesCount": it.get("diggCount"),
                 "commentsCount": it.get("commentCount"),
@@ -742,21 +770,58 @@ def _merge_results_in_input_order(
     known_map: Dict[str, dict],
     fetched_new_items: List[Dict[str, Optional[str]]]
 ) -> List[Dict[str, Optional[str]]]:
-    fetched_map = {item.get("url"): item for item in fetched_new_items or [] if item.get("url")}
+    # Índices por identidade e por URL normalizada
+    fetched_by_id: Dict[Tuple[str, str], dict] = {}
+    fetched_by_norm_url: Dict[str, dict] = {}
+
+    for it in fetched_new_items or []:
+        # tente várias origens de URL que podem estar presentes
+        cand_urls = []
+        for k in ("url", "inputUrl", "webVideoUrl", "shareUrl"):
+            v = it.get(k)
+            if isinstance(v, str) and v:
+                cand_urls.append(v)
+        # de-duplicar mantendo ordem
+        seen = set()
+        cand_urls = [u for u in cand_urls if not (u in seen or seen.add(u))]
+        # indexar
+        for u in cand_urls:
+            pid = _post_identity(u)
+            if pid and pid not in fetched_by_id:
+                fetched_by_id[pid] = it
+            nu = _normalize_url(u)
+            if nu and nu not in fetched_by_norm_url:
+                fetched_by_norm_url[nu] = it
+
     results: List[Dict[str, Optional[str]]] = []
+
     for u in input_urls:
+        # 1) se já está no Mongo (chave por URL exata como já estava)
         if u in known_map:
             doc = {k: known_map[u].get(k) for k in MONGO_FIELDS}
             doc["_from_mongo"] = True
             results.append(doc)
+            continue
+
+        # 2) procurar por identidade estável
+        pid = _post_identity(u)
+        it = fetched_by_id.get(pid) if pid else None
+
+        # 3) fallback para URL normalizada
+        if not it:
+            it = fetched_by_norm_url.get(_normalize_url(u))
+
+        if it:
+            row = {k: it.get(k) for k in OUTPUT_FIELDS}
+            # Garanta que a 'url' de saída preserve a solicitada,
+            # para manter a ordem e facilitar rastreio
+            row["url"] = u
+            row["_from_mongo"] = False
+            results.append(row)
         else:
-            it = fetched_map.get(u)
-            if it:
-                row = {k: it.get(k) for k in OUTPUT_FIELDS}
-                row["_from_mongo"] = False
-                results.append(row)
-            else:
-                results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
+            # não encontrado em lugar algum → placeholder
+            results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
+
     return results
 
 def _tipo_midia_url(url: Optional[str]) -> str:
@@ -1049,4 +1114,5 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
