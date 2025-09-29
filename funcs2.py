@@ -566,8 +566,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                             except Exception as e:
                                 tlog(f"[IG] ⚠️ Falha ao baixar {mu}: {e}")
                         out.append({
-                            "urlOriginal": it.get("inputUrl") or _any_post_url(it),
-                            "urlCanonica": it.get("url") or _any_post_url(it),
+                            "url": it.get("inputUrl") or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
@@ -728,8 +727,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
             _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
             out.append({
-                "urlOriginal": it.get("inputUrl") or _any_post_url(it),
-                "urlCanonica": it.get("url") or _any_post_url(it),
+                "url": it.get("inputUrl") or _any_post_url(it),
                 "ownerUsername": ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId"),
                 "likesCount": it.get("diggCount"),
                 "commentsCount": it.get("commentCount"),
@@ -1114,5 +1112,6 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
