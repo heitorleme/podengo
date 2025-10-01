@@ -619,8 +619,15 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
 
                 for it in items:
                     try:
-                        media_candidates = it.get("videoUrl") or it.get("displayUrl") or it.get("images")
-                        m_urls = _ensure_list(media_candidates)
+                        m_urls = []
+                        if it.get("videoUrl"):
+                            m_urls.append(it["videoUrl"])
+                        if it.get("displayUrl"):
+                            m_urls.append(it["displayUrl"])
+                        if it.get("images"):
+                            m_urls.extend(it["images"] if isinstance(it["images"], list) else [it["images"]])
+
+                        m_urls = _ensure_list(m_urls)
                         local_paths: List[str] = []
                         for mu in m_urls:
                             try:
@@ -695,35 +702,78 @@ def _fetch_instagram_from_profiles(
     results_limit: int = 5,
     max_results: int = 1000,
 ) -> List[Dict[str, Optional[str]]]:
+    """
+    Recebe URLs de perfil (instagram.com/<user>/), roda 1 run do Apify com resultsType=posts
+    e transforma os itens retornados no mesmo formato do _fetch_instagram.
+    """
 
-    # --- helper corrigida/indentada ---
     def _ig_permalink_from_item(it: dict) -> Optional[str]:
-        # tenta shortCode -> permalink /p/<code>/
-        sc = it.get("shortCode") or _shortcode(it.get("url") or it.get("inputUrl") or "")
+        sc = it.get("shortCode") or _shortcode(it.get("url"))
         if sc:
             return f"https://www.instagram.com/p/{sc}/"
-        # fallback
         return it.get("url") or it.get("inputUrl")
 
     apify_client, _, _ = get_clients()
-    # normaliza + dedup perfis
     profiles = list(dict.fromkeys(_normalize_ig_profile_url(u) for u in profile_urls if _is_ig_profile_url(u)))
     if not profiles:
         tlog("[IG][PROFILES] Nenhum perfil válido.")
         return []
 
-    # ...
+    tlog(f"[IG][PROFILES] ▶️ Run único ({len(profiles)} perfis) | limit={results_limit}")
+    run = apify_client.actor(INSTAGRAM_ACTOR).start(
+        run_input={
+            "addParentData": False,
+            "directUrls": profiles,
+            "enhanceUserSearchWithFacebookPage": False,
+            "isUserReelFeedURL": False,
+            "isUserTaggedFeedURL": False,
+            "resultsLimit": int(results_limit),
+            "resultsType": "posts",
+        }
+    )
+    run_id = run.get("id")
+    if not run_id:
+        tlog("[IG][PROFILES] ❌ Sem run_id.")
+        return []
 
+    ds = None
+    ds_id = None
+    offset = 0
+    out: List[Dict[str, Optional[str]]] = []
+    no_new_ticks = 0
+
+    while True:
+        info = apify_client.run(run_id).get()
+        status = info.get("status")
+        if not ds_id:
+            ds_id = info.get("defaultDatasetId")
+            if ds_id:
+                ds = apify_client.dataset(ds_id)
+                tlog(f"[IG][PROFILES] 🟡 status={status}, dataset={ds_id}")
+
+        if ds_id:
+            page = ds.list_items(limit=200, offset=offset, clean=True)
+            items = _page_items(page)
+            if items:
+                tlog(f"[IG][PROFILES] 📥 +{len(items)} (offset {offset}→{offset+len(items)})")
+                offset += len(items)
                 for it in items:
                     try:
-                        # mídia
+                        # mídia (coleta múltiplas possíveis fontes)
                         def _ensure_list(x):
                             if not x: return []
                             if isinstance(x, (list, tuple)): return list(x)
                             return [x]
 
-                        media_candidates = it.get("videoUrl") or it.get("displayUrl") or it.get("images")
-                        m_urls = _ensure_list(media_candidates)
+                        m_urls: List[str] = []
+                        if it.get("videoUrl"):
+                            m_urls.append(it["videoUrl"])
+                        if it.get("displayUrl"):
+                            m_urls.append(it["displayUrl"])
+                        if it.get("images"):
+                            m_urls.extend(_ensure_list(it["images"]))
+                        # remove duplicados preservando ordem
+                        seen_mu, m_urls = set(), [u for u in m_urls if not (u in seen_mu or seen_mu.add(u))]
 
                         local_paths: List[str] = []
                         for mu in m_urls:
@@ -749,14 +799,14 @@ def _fetch_instagram_from_profiles(
                             }
 
                         caption = it.get("caption") or ""
-                        # <<< remover a checagem bizarra por string; a função existe
                         hashtags, mentions = _extract_tags_and_mentions(caption)
 
                         permalink = _ig_permalink_from_item(it)
 
-                        # --- Fonte do perfil: constrói a partir do ownerUsername ---
                         owner = it.get("ownerUsername") or it.get("username")
-                        source_profile = _normalize_ig_profile_url(f"https://www.instagram.com/{owner}/") if owner else None
+                        source_profile = (
+                            _normalize_ig_profile_url(f"https://www.instagram.com/{owner}/") if owner else None
+                        )
 
                         out.append({
                             "url": permalink,
@@ -783,9 +833,20 @@ def _fetch_instagram_from_profiles(
                             return out[:max_results]
                     except Exception as e:
                         tlog(f"[IG][PROFILES] ❌ Erro processando item: {e}")
+                no_new_ticks = 0
+            else:
+                no_new_ticks += 1
 
-# --- no merge: nenhuma mudança lógica, mas garanta que as chaves de perfil batem ---
-# já está usando _normalize_ig_profile_url em ambas as pontas
+        if status in {"RUNNING", "READY"}:
+            tlog(f"[IG][PROFILES] ⏳ status={status}, recebidos={len(out)}")
+        else:
+            tlog(f"[IG][PROFILES] 🧭 status final={status}, total={len(out)}")
+            if no_new_ticks >= 2:
+                break
+        time.sleep(POLL_SEC)
+
+    tlog(f"[IG][PROFILES] 🏁 Concluído com {len(out)} resultado(s)")
+    return out
 
 # 4) (opcional) De-dup no final de fetch_social_post_summary_async, antes do return:
 def _dedup_results(rows: List[dict]) -> List[dict]:
@@ -1012,13 +1073,12 @@ def _merge_results_in_input_order(
         seen = set()
         return [u for u in cand if not (u in seen or seen.add(u))]
 
+    # indexação dos itens novos
     for it in fetched_new_items or []:
-        # index por perfil de origem (se a rotina de perfis setar esse campo)
         sp = it.get("_source_profile")
         if isinstance(sp, str) and sp:
             by_profile.setdefault(sp, []).append(it)
 
-        # index por identidade e url normalizada
         for u in _cand_urls(it):
             pid = _post_identity(u)
             if pid and pid not in fetched_by_id:
@@ -1033,7 +1093,7 @@ def _merge_results_in_input_order(
         # 1) reaproveita do Mongo
         if u in known_map:
             doc = {k: known_map[u].get(k) for k in MONGO_FETCH_FIELDS}
-            doc["url"] = u  # aqui manter a URL de entrada (é o que já estava salvo)
+            doc["url"] = u  # aqui manter a URL de entrada (Mongo já tinha salvo assim)
             doc["_from_mongo"] = True
             results.append(doc)
             continue
@@ -1044,14 +1104,17 @@ def _merge_results_in_input_order(
             posts = by_profile.get(prof_key, [])
             for it in posts:
                 row = {k: it.get(k) for k in OUTPUT_FIELDS}
-                # NÃO sobrescreva a url; se não vier, tente derivar
+                # não sobrescreva a url: mantenha permalink se já existe
                 if not row.get("url"):
-                    row["url"] = it.get("url") or it.get("inputUrl") or u
+                    row["url"] = it.get("inputUrl") or u
                 row["_from_mongo"] = False
                 results.append(row)
-            # se não houver nada, ainda devolve um placeholder
             if not posts:
-                results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
+                results.append({
+                    "url": u,
+                    **{k: None for k in OUTPUT_FIELDS if k != "url"},
+                    "_from_mongo": False
+                })
             continue
 
         # 3) caso normal (post único): tenta por identidade e por URL normalizada
@@ -1062,13 +1125,17 @@ def _merge_results_in_input_order(
 
         if it:
             row = {k: it.get(k) for k in OUTPUT_FIELDS}
-            # >>> AQUI O AJUSTE-CHAVE: não force "url" a ser a URL de entrada; mantenha o permalink do post
+            # mantém permalink se existir
             if not row.get("url"):
-                row["url"] = it.get("url") or it.get("inputUrl") or u
+                row["url"] = it.get("inputUrl") or u
             row["_from_mongo"] = False
             results.append(row)
         else:
-            results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
+            results.append({
+                "url": u,
+                **{k: None for k in OUTPUT_FIELDS if k != "url"},
+                "_from_mongo": False
+            })
 
     return results
 
@@ -1376,7 +1443,14 @@ async def fetch_social_post_summary_async(
         results = results[:max_results]
 
     tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
-    results = _dedup_results(results)
+    seen = set()
+    deduped = []
+    for r in results:
+        u = r.get("url")
+        if u and u not in seen:
+            deduped.append(r)
+            seen.add(u)
+    results = deduped
     return results
 
 async def rodar_pipeline(urls: List[str]) -> List[dict]:
@@ -1404,6 +1478,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
