@@ -810,7 +810,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
 # Pipeline principal (busca → transcrição → limpeza)
 # ─────────────────────────────────────────────────────────────
 def _partition_known_unknown_by_mongo(all_urls: List[str]) -> Tuple[Dict[str, dict], Set[str]]:
-    known_map = _load_docs_by_urls(all_urls, MONGO_FIELDS)
+    known_map = _load_docs_by_urls(all_urls, MONGO_FETCH_FIELDS)
     known_urls = set(known_map.keys())
     unknown_set = set(u for u in all_urls if u not in known_urls)
     return known_map, unknown_set
@@ -1164,6 +1164,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
