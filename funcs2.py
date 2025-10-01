@@ -167,7 +167,7 @@ def tlog(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 # Mongo helpers
 # ─────────────────────────────────────────────────────────────
-MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "timestamp", "transcricao", "framesDescricao"]
+MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "post_timestamp", "transcricao", "framesDescricao"]
 MEDIA_FIELDS  = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
 OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount", "audio_id", "audio_snapshot", "hashtags", "mentions"]
 MONGO_FETCH_FIELDS = MONGO_FIELDS + OTHER_FIELDS
@@ -1192,6 +1192,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
