@@ -426,6 +426,38 @@ INSTAGRAM_ACTOR = "apify/instagram-scraper"
 TIKTOK_ACTOR    = "clockworks/tiktok-scraper"
 POLL_SEC = 2  # polling em segundos
 
+IG_PROFILE_RESERVED = {"p", "reel", "reels", "stories", "explore", "tv"}
+
+def _is_ig_profile_url(u: Optional[str]) -> bool:
+    if not u or "instagram.com" not in u:
+        return False
+    try:
+        p = urlparse(u)
+        segs = [s for s in (p.path or "").split("/") if s]
+        # perfil simples: /<username>[/]
+        return len(segs) == 1 and segs[0].lower() not in IG_PROFILE_RESERVED
+    except Exception:
+        return False
+
+def _normalize_ig_profile_url(u: str) -> str:
+    # força https e barra final
+    if not re.match(r"^https?://", u, flags=re.I):
+        u = "https://" + u
+    p = urlparse(u.strip())
+    path = (p.path or "/").rstrip("/") + "/"
+    return urlunparse(("https", p.netloc.lower(), path, "", "", ""))
+
+def _ig_post_url_from_item(i: dict) -> str:
+    # tenta campos comuns; se só tiver shortCode, monta URL canônica
+    if isinstance(i.get("inputUrl"), str) and i["inputUrl"]:
+        return i["inputUrl"]
+    if isinstance(i.get("url"), str) and i["url"]:
+        return i["url"]
+    sc = i.get("shortCode")
+    if isinstance(sc, str) and sc:
+        return f"https://www.instagram.com/p/{sc}/"
+    return ""
+
 def _normalize_url(u: Optional[str]) -> Optional[str]:
     if not u:
         return None
@@ -610,7 +642,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                         hashtags, mentions = _extract_tags_and_mentions(caption)
                         
                         out.append({
-                            "url": it.get("inputUrl") or _any_post_url(it),
+                            "url":  _ig_post_url_from_item(it) or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
@@ -648,6 +680,138 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
         time.sleep(POLL_SEC)
 
     tlog(f"[IG] 🏁 Concluído com {len(out)} resultado(s)")
+    return out
+
+def _fetch_instagram_from_profiles(
+    profile_urls: List[str],
+    api_token: str,
+    results_limit: int = 5,
+    max_results: int = 1000,
+) -> List[Dict[str, Optional[str]]]:
+    """
+    Recebe URLs de perfil (instagram.com/<user>/), roda 1 run do Apify com resultsType=posts
+    e transforma os itens retornados no mesmo formato do _fetch_instagram.
+    """
+    apify_client, _, _ = get_clients()
+    # normaliza + dedup perfis
+    profiles = list(dict.fromkeys(_normalize_ig_profile_url(u) for u in profile_urls if _is_ig_profile_url(u)))
+    if not profiles:
+        tlog("[IG][PROFILES] Nenhum perfil válido.")
+        return []
+
+    tlog(f"[IG][PROFILES] ▶️ Run único ({len(profiles)} perfis) | limit={results_limit}")
+    run = apify_client.actor(INSTAGRAM_ACTOR).start(
+        run_input={
+            "addParentData": False,
+            "directUrls": profiles,
+            "enhanceUserSearchWithFacebookPage": False,
+            "isUserReelFeedURL": False,
+            "isUserTaggedFeedURL": False,
+            "resultsLimit": int(results_limit),
+            "resultsType": "posts",
+        }
+    )
+    run_id = run.get("id")
+    if not run_id:
+        tlog("[IG][PROFILES] ❌ Sem run_id.")
+        return []
+
+    ds = None
+    ds_id = None
+    offset = 0
+    out: List[Dict[str, Optional[str]]] = []
+    no_new_ticks = 0
+
+    while True:
+        info = apify_client.run(run_id).get()
+        status = info.get("status")
+        if not ds_id:
+            ds_id = info.get("defaultDatasetId")
+            if ds_id:
+                ds = apify_client.dataset(ds_id)
+                tlog(f"[IG][PROFILES] 🟡 status={status}, dataset={ds_id}")
+
+        if ds_id:
+            page = ds.list_items(limit=200, offset=offset, clean=True)
+            items = _page_items(page)
+            if items:
+                tlog(f"[IG][PROFILES] 📥 +{len(items)} (offset {offset}→{offset+len(items)})")
+                offset += len(items)
+                for it in items:
+                    try:
+                        # mídia
+                        def _ensure_list(x):
+                            if not x: return []
+                            if isinstance(x, (list, tuple)): return list(x)
+                            return [x]
+
+                        media_candidates = it.get("videoUrl") or it.get("displayUrl") or it.get("images")
+                        m_urls = _ensure_list(media_candidates)
+
+                        local_paths: List[str] = []
+                        for mu in m_urls:
+                            try:
+                                lp = _download_file(mu, pasta_destino=media)
+                                if lp:
+                                    local_paths.append(lp)
+                            except Exception as e:
+                                tlog(f"[IG][PROFILES] ⚠️ Falha download {mu}: {e}")
+
+                        # áudio (se disponível)
+                        _audio = it.get("musicInfo", {}) or {}
+                        _raw_audio_id = _audio.get("audio_id")
+                        audio_id = f"ig_{_raw_audio_id}" if _raw_audio_id is not None else None
+                        artist_name = _audio.get("artist_name")
+                        song_name = _audio.get("song_name")
+                        audio_snapshot = None
+                        if audio_id is not None or artist_name is not None or song_name is not None:
+                            audio_snapshot = {
+                                "author_name": artist_name,
+                                "audio_name": song_name,
+                                "plataforma": "Instagram",
+                            }
+
+                        # caption + tags/mentions
+                        caption = it.get("caption") or ""
+                        hashtags, mentions = _extract_tags_and_mentions(caption) if " _extract_tags_and_mentions" in globals() else ([], [])
+
+                        out.append({
+                            "url": _ig_post_url_from_item(it),
+                            "ownerUsername": it.get("ownerUsername") or it.get("username"),
+                            "likesCount": it.get("likesCount"),
+                            "commentsCount": it.get("commentsCount"),
+                            "caption": caption,
+                            "hashtags": hashtags,
+                            "mentions": mentions,
+                            "type": it.get("type") or ("Video" if it.get("isVideo") else "Image"),
+                            "timestamp": it.get("timestamp") or it.get("takenAtTs"),
+                            "videoPlayCount": it.get("videoPlayCount") or it.get("videoViewCount"),
+                            "videoViewCount": it.get("videoViewCount") or it.get("videoPlayCount"),
+                            "audio_id": audio_id,
+                            "audio_snapshot": audio_snapshot,
+                            "mediaUrl": m_urls if len(m_urls) > 1 else (m_urls[0] if m_urls else None),
+                            "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
+                            "mediaLocalPath": local_paths[0] if local_paths else None,
+                        })
+
+                        if len(out) >= max_results:
+                            tlog(f"[IG][PROFILES] ⛔ max_results atingido.")
+                            return out[:max_results]
+                    except Exception as e:
+                        tlog(f"[IG][PROFILES] ❌ Erro processando item: {e}")
+                no_new_ticks = 0
+            else:
+                no_new_ticks += 1
+
+        if status in {"RUNNING", "READY"}:
+            tlog(f"[IG][PROFILES] ⏳ status={status}, recebidos={len(out)}")
+        else:
+            tlog(f"[IG][PROFILES] 🧭 status final={status}, total={len(out)}")
+            if no_new_ticks >= 2:
+                break
+        time.sleep(POLL_SEC)
+
+    tlog(f"[IG][PROFILES] 🏁 Concluído com {len(out)} resultado(s)")
     return out
 
 def _tt_id(u: str) -> Optional[str]:
@@ -1133,38 +1297,79 @@ async def fetch_social_post_summary_async(
 
     known_map, unknown_set = _partition_known_unknown_by_mongo(input_urls)
 
-    urls_instagram = [u for u in input_urls if "instagram.com" in u and u in unknown_set]
-    urls_tiktok    = [u for u in input_urls if "tiktok.com"   in u and u in unknown_set]
-    urls_static    = [u for u in input_urls if "https://static-resources" in u and u in unknown_set]
+    # separa perfis e posts do IG
+    urls_instagram_profiles = [u for u in input_urls if "instagram.com" in u and _is_ig_profile_url(u)]
+    urls_instagram_posts    = [u for u in input_urls if "instagram.com" in u and _shortcode(u)]
+    urls_tiktok             = [u for u in input_urls if "tiktok.com" in u]
+    urls_static             = [u for u in input_urls if "https://static-resources" in u]
+
+    # só buscamos de fato o que não está no Mongo (para posts IG/TT). Perfis sempre viram posts novos.
+    urls_instagram_posts = [u for u in urls_instagram_posts if u in unknown_set]
+    urls_tiktok          = [u for u in urls_tiktok if u in unknown_set]
+    urls_static          = [u for u in urls_static if u in unknown_set]
 
     tlog(
-        f"[FETCH] Instagram URLs novas: {len(urls_instagram)} | "
-        f"TikTok URLs novas: {len(urls_tiktok)} | "
-        f"Static URLs novas: {len(urls_static)} | "
+        f"[FETCH] IG posts novos: {len(urls_instagram_posts)} | "
+        f"IG perfis: {len(urls_instagram_profiles)} | "
+        f"TT novos: {len(urls_tiktok)} | Static novos: {len(urls_static)} | "
         f"Já no Mongo: {len(known_map)}"
     )
 
     tasks = []
-    if urls_instagram:
-        tlog("[FETCH] Agendando fetch do Instagram…")
-        tasks.append(asyncio.to_thread(_fetch_instagram, urls_instagram, api_token, max_results))
+    if urls_instagram_posts:
+        tlog("[FETCH] Agendando fetch IG (posts)…")
+        tasks.append(asyncio.to_thread(_fetch_instagram, urls_instagram_posts, api_token, max_results))
+    if urls_instagram_profiles:
+        tlog("[FETCH] Agendando fetch IG (perfis→posts)…")
+        # results_limit=5 conforme seu exemplo (ajuste se quiser expor como parâmetro)
+        tasks.append(asyncio.to_thread(_fetch_instagram_from_profiles, urls_instagram_profiles, api_token, 5, max_results))
     if urls_tiktok:
-        tlog("[FETCH] Agendando fetch do TikTok…")
+        tlog("[FETCH] Agendando fetch TikTok…")
         tasks.append(asyncio.to_thread(_fetch_tiktok, urls_tiktok, api_token, max_results))
     if urls_static:
-        tlog("[FETCH] Agendando fetch de Static Resources (download direto)…")
+        tlog("[FETCH] Agendando fetch Static…")
         tasks.append(asyncio.to_thread(_fetch_static_resources, urls_static, max_results))
 
     fetched_new_items: List[Dict[str, Optional[str]]] = []
     if tasks:
         parts = await asyncio.gather(*tasks)
         for p in parts:
-            fetched_new_items.extend(p)
+            fetched_new_items.extend(p or [])
 
+    # merge normal (mapeia 1:1 URLs de post pedidas)
     results = _merge_results_in_input_order(input_urls, known_map, fetched_new_items)
+
+    # remove placeholders vazios para URLs de perfil (não há 1:1)
+    profile_set = set(_normalize_ig_profile_url(u) for u in urls_instagram_profiles)
+    def _is_placeholder_for_profile(row: dict) -> bool:
+        u = row.get("url") or ""
+        try:
+            nu = _normalize_ig_profile_url(u) if "instagram.com" in u else u
+        except Exception:
+            nu = u
+        if nu not in profile_set:
+            return False
+        # placeholder: todos campos None (exceto url, _from_mongo)
+        return all(row.get(k) is None for k in OUTPUT_FIELDS if k != "url")
+
+    results = [r for r in results if not _is_placeholder_for_profile(r)]
+
+    # garante que posts vindos dos perfis entrem mesmo se não foram mapeados
+    seen_urls = set(r.get("url") for r in results if r.get("url"))
+    for it in fetched_new_items:
+        u = it.get("url")
+        if u and u not in seen_urls:
+            # mantém mesmo schema
+            row = {k: it.get(k) for k in OUTPUT_FIELDS}
+            row["url"] = u
+            row["_from_mongo"] = False
+            results.append(row)
+            seen_urls.add(u)
+
     if len(results) > max_results:
         results = results[:max_results]
-    tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total. (reutilizados={len(known_map)}, novos={len(fetched_new_items)})")
+
+    tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
     return results
 
 async def rodar_pipeline(urls: List[str]) -> List[dict]:
@@ -1192,6 +1397,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
