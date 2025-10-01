@@ -169,7 +169,8 @@ def tlog(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "timestamp", "transcricao", "framesDescricao"]
 MEDIA_FIELDS  = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
-OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount"]
+OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount", "audio_id"]
+MONGO_FETCH_FIELDS = MONGO_FIELDS + OTHER_FIELDS
 OUTPUT_FIELDS = MONGO_FIELDS + MEDIA_FIELDS + OTHER_FIELDS
 
 def _connect_to_mongo(
@@ -201,7 +202,7 @@ def _mongo_collection():
         raise RuntimeError("Não foi possível conectar ao MongoDB (verifique segredos).")
     return db["video-transcript"]
 
-def _load_docs_by_urls(urls: List[str], fields: List[str] = MONGO_FIELDS) -> Dict[str, dict]:
+def _load_docs_by_urls(urls: List[str], fields: List[str] = MONGO_FETCH_FIELDS) -> Dict[str, dict]:
     if not urls:
         return {}
     col = _mongo_collection()
@@ -212,7 +213,10 @@ def _load_docs_by_urls(urls: List[str], fields: List[str] = MONGO_FIELDS) -> Dic
     for doc in cursor:
         u = doc.get("url")
         if u:
-            out[u] = doc
+            # garante que todas as chaves existam (None quando ausentes)
+            clean = {f: doc.get(f) for f in fields}
+            clean["url"] = u
+            out[u] = clean
     return out
 
 def _upload_para_mongo(resultado: dict):
@@ -844,7 +848,7 @@ def _merge_results_in_input_order(
     for u in input_urls:
         # 1) se já está no Mongo (chave por URL exata como já estava)
         if u in known_map:
-            doc = {k: known_map[u].get(k) for k in MONGO_FIELDS}
+            doc = {k: known_map[u].get(k) for k in MONGO_FETCH_FIELDS}
             doc["_from_mongo"] = True
             results.append(doc)
             continue
@@ -1160,6 +1164,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
