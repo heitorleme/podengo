@@ -73,7 +73,7 @@ def _run_async_pipeline(urls: List[str]):
     return asyncio.run(rodar_pipeline(urls))
 
 def _sanitize_items(resultados):
-    campos_excluir = {"mediaLocalPaths", "mediaLocalPath", "base64Frames"}
+    campos_excluir = {"mediaLocalPaths", "mediaLocalPath", "base64Frames", "mediaUrl"}
     itens_sanitizados = []
     itens_para_upload = []
 
@@ -165,6 +165,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # Mantém compatibilidade com execução direta (opcional)
 if __name__ == "__main__":
     print("Este módulo agora espera ser chamado via main(urls_or_text).")
+
 
 
 
