@@ -653,6 +653,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                             }
 
                         caption = it.get("caption")
+                        timestamp = it.get("timestamp")
                         hashtags, mentions = _extract_tags_and_mentions(caption)
                         
                         out.append({
@@ -662,7 +663,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                             "commentsCount": it.get("commentsCount"),
                             "caption": caption,
                             "type": it.get("type"),
-                            "timestamp": it.get("timestamp"),
+                            "post_timestamp": timestamp,
                             "videoPlayCount": it.get("videoPlayCount"),
                             "videoViewCount": it.get("videoViewCount"),
                             "hashtags": hashtags,
@@ -809,7 +810,7 @@ def _fetch_instagram_from_profiles(
                         source_profile = (
                             _normalize_ig_profile_url(f"https://www.instagram.com/{owner}/") if owner else None
                         )
-
+                        timestamp = it.get("timestamp")
                         row = {
                             "url": permalink,
                             "ownerUsername": owner,
@@ -819,7 +820,7 @@ def _fetch_instagram_from_profiles(
                             "hashtags": hashtags,
                             "mentions": mentions,
                             "type": it.get("type") or ("Video" if it.get("isVideo") else "Image"),
-                            "timestamp": it.get("timestamp") or it.get("takenAtTs"),
+                            "post_timestamp": timestamp,
                             "videoPlayCount": it.get("videoPlayCount") or it.get("videoViewCount"),
                             "videoViewCount": it.get("videoViewCount") or it.get("videoPlayCount"),
                             "audio_id": audio_id,
@@ -1489,6 +1490,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
