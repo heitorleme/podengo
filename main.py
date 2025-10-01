@@ -151,7 +151,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
         r.pop("audio_snapshot", None)
 
     df = pd.DataFrame(itens_sanitizados)
-    df = df.drop(columns=["_from_mongo"])
+    df = df.drop(columns=["_from_mongo", "hashtags", "mentions"])
     excel_bytes, excel_name = _to_excel_bytes(df)
 
     return {
@@ -165,6 +165,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # Mantém compatibilidade com execução direta (opcional)
 if __name__ == "__main__":
     print("Este módulo agora espera ser chamado via main(urls_or_text).")
+
 
 
 
