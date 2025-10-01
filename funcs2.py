@@ -1039,6 +1039,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
                 }
 
             caption = (it.get("text") or it.get("description") or "")
+            timestamp = (it.get("createTimeISO") or it.get("createTime") or "")
             hashtags, mentions = _extract_tags_and_mentions(caption)
             out.append({
                 "url": it.get("inputUrl") or _any_post_url(it),
@@ -1047,7 +1048,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
                 "commentsCount": it.get("commentCount"),
                 "caption": caption,
                 "type": _type,
-                "timestamp": it.get("createTimeISO") or it.get("createTime"),
+                "post_timestamp": timestamp,
                 "videoPlayCount": it.get("playCount"),
                 "videoViewCount": it.get("playCount"),
                 "hashtags": hashtags,
@@ -1080,14 +1081,14 @@ def _fetch_tiktok_from_profiles(
     post_urls_extra: Optional[List[str]] = None,
 ) -> List[Dict[str, Optional[str]]]:
     """
-    Aceita **apenas links completos de perfil do TikTok** (ex.: https://www.tiktok.com/@foo/).
-    'Limpa' cada link para extrair o username (parte após '@') e envia **somente usernames**
-    no parâmetro 'profiles' do actor clockworks/tiktok-scraper.
+    Usa clockworks/tiktok-scraper com 'profiles' (usernames extraídos de links completos).
+    Normaliza a saída para o schema do pipeline e associa cada item ao perfil de origem
+    usando o campo 'input' do item (username que disparamos para o actor).
     """
     apify_client, _, _ = get_clients()
 
-    # 1) Normalização/Validação rígida: só links completos; ignora '@user' ou 'user' soltos.
-    usernames: List[str] = []
+    # 1) Aceita APENAS links completos de perfil; extrai usernames e guarda o mapa username->perfil
+    username_to_profile_url: Dict[str, str] = {}
     ignorados: List[str] = []
 
     for raw in profile_urls or []:
@@ -1095,45 +1096,34 @@ def _fetch_tiktok_from_profiles(
             ignorados.append(str(raw)); continue
 
         u = raw.strip()
-        # exige link com domínio tiktok; acrescenta https:// se faltar esquema
         if "tiktok.com" not in u:
             ignorados.append(u); continue
         if not re.match(r"^https?://", u, flags=re.I):
             u = "https://" + u
-
-        # agora, precisa ser /@username[/]
         if not _is_tt_profile_url(u):
             ignorados.append(u); continue
 
-        # normaliza e extrai username
         u_norm = _normalize_tt_profile_url(u)
         un = _tt_username_from_url(u_norm)
         if un:
-            usernames.append(un)
+            # preferimos a URL normalizada original fornecida pelo usuário
+            username_to_profile_url.setdefault(un, u_norm)
         else:
             ignorados.append(u)
 
-    # dedup preservando ordem
-    usernames = list(dict.fromkeys(usernames))
-
+    usernames = list(username_to_profile_url.keys())
     if ignorados:
         tlog(f"[TT][PROFILES] Ignorados (não são links completos de perfil): {len(ignorados)}")
-        # opcional: listar alguns exemplos
-        try:
-            exemplos = ", ".join(ignorados[:3])
-            tlog(f"[TT][PROFILES] Exemplos ignorados: {exemplos}")
-        except Exception:
-            pass
 
     if not usernames:
         tlog("[TT][PROFILES] ❌ Nenhum link completo de perfil válido.")
         return []
 
-    # 2) Monta input do actor passando **somente usernames**
+    # 2) Monta input do actor exatamente no formato esperado
     run_input = {
         "excludePinnedPosts": False,
-        "postURLs": list(dict.fromkeys((post_urls_extra or []))),  # opcional/híbrido
-        "profiles": usernames,  # <<< apenas usernames, derivados dos links
+        "postURLs": list(dict.fromkeys((post_urls_extra or []))),
+        "profiles": usernames,  # << só usernames
         "proxyCountryCode": "None",
         "resultsPerPage": int(results_limit),
         "scrapeRelatedVideos": False,
@@ -1155,9 +1145,7 @@ def _fetch_tiktok_from_profiles(
     ds, ds_id, offset = None, None, 0
     out: List[Dict[str, Optional[str]]] = []
     no_new_ticks = 0
-
-    def _profile_url_from_username(u: str) -> str:
-        return _normalize_tt_profile_url(f"https://www.tiktok.com/@{u}/")
+    per_user_count: Dict[str, int] = {}
 
     while True:
         info = apify_client.run(run_id).get()
@@ -1177,22 +1165,35 @@ def _fetch_tiktok_from_profiles(
 
                 for it in items:
                     try:
+                        # 2.1) Determina o perfil de origem de forma robusta via 'input' (username enviado ao actor)
+                        # O payload real do actor inclui "input": "<username>"
+                        src_username = (it.get("input") or "").strip() or \
+                                       ((it.get("authorMeta") or {}).get("name") or "").strip()
+
+                        src_profile_url = None
+                        if src_username in username_to_profile_url:
+                            src_profile_url = username_to_profile_url[src_username]
+                        elif src_username:
+                            # fallback se não estava no mapa por algum motivo
+                            src_profile_url = _normalize_tt_profile_url(f"https://www.tiktok.com/@{src_username}/")
+
+                        # 2.2) Mídias — prioriza downloadAddr e webVideoUrl
                         def _ensure_list(x):
                             if not x: return []
                             if isinstance(x, (list, tuple)): return list(x)
                             return [x]
 
-                        # candidatos de mídia
                         media_candidates: List[str] = []
-                        media_candidates += [u for u in _ensure_list(it.get("mediaUrls")) if isinstance(u, str) and u.strip()]
                         dl_vm = (it.get("videoMeta") or {}).get("downloadAddr")
                         if isinstance(dl_vm, str) and dl_vm.strip():
                             media_candidates.append(dl_vm.strip())
+                        media_candidates += [u for u in _ensure_list(it.get("mediaUrls")) if isinstance(u, str) and u.strip()]
 
+                        # dedup preservando ordem
                         seen_mu = set()
                         media_candidates = [u for u in media_candidates if not (u in seen_mu or seen_mu.add(u))]
 
-                        # downloads
+                        # downloads (mas mesmo se falhar, mantemos o item)
                         local_paths: List[str] = []
                         first_ok_path: Optional[str] = None
                         is_slideshow = bool(it.get("isSlideshow"))
@@ -1211,7 +1212,7 @@ def _fetch_tiktok_from_profiles(
 
                         _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
-                        # áudio
+                        # 2.3) Áudio
                         mm = (it.get("musicMeta") or {})
                         audio_id = None
                         author_name = None
@@ -1231,14 +1232,25 @@ def _fetch_tiktok_from_profiles(
                                 "plataforma": "Tiktok",
                             }
 
+                        # 2.4) Texto/hashtags
                         caption = (it.get("text") or it.get("description") or "") or ""
-                        hashtags, mentions = _extract_tags_and_mentions(caption)
+                        hashtags_cap, mentions_cap = _extract_tags_and_mentions(caption)
 
+                        # Se o actor já trouxe hashtags como objetos, mesclamos os nomes
+                        h_objs = it.get("hashtags") or []
+                        if isinstance(h_objs, list):
+                            h_names = [h.get("name") for h in h_objs if isinstance(h, dict) and h.get("name")]
+                        else:
+                            h_names = []
+                        hashtags = _dedup_preservando_ordem(list(hashtags_cap) + h_names)
+                        mentions = mentions_cap  # (o actor também pode trazer 'mentions', mas já extraímos do texto)
+
+                        # 2.5) Campos canônicos
                         owner = ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId")
-                        source_profile = _profile_url_from_username(owner) if owner else None
+                        permalink = it.get("webVideoUrl") or it.get("url") or it.get("inputUrl")
 
                         row = {
-                            "url": it.get("webVideoUrl") or it.get("url") or it.get("inputUrl"),
+                            "url": permalink,
                             "ownerUsername": owner,
                             "likesCount": it.get("diggCount"),
                             "commentsCount": it.get("commentCount"),
@@ -1254,9 +1266,13 @@ def _fetch_tiktok_from_profiles(
                             "mediaUrl": media_candidates if len(media_candidates) > 1 else (media_candidates[0] if media_candidates else None),
                             "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                             "mediaLocalPath": first_ok_path,
-                            "_source_profile": source_profile,
+                            "_source_profile": src_profile_url,
                         }
                         out.append(row)
+
+                        # contagem por username (debug)
+                        if src_username:
+                            per_user_count[src_username] = per_user_count.get(src_username, 0) + 1
 
                         if len(out) >= max_results:
                             tlog(f"[TT][PROFILES] ⛔ max_results atingido.")
@@ -1273,6 +1289,8 @@ def _fetch_tiktok_from_profiles(
             tlog(f"[TT][PROFILES] ⏳ status={status}, recebidos={len(out)}")
         else:
             tlog(f"[TT][PROFILES] 🧭 status final={status}, total={len(out)}")
+            if per_user_count:
+                tlog(f"[TT][PROFILES] Resumo por username: {per_user_count}")
             if no_new_ticks >= 2:
                 break
         time.sleep(POLL_SEC)
@@ -1739,6 +1757,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
