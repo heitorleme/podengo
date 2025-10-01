@@ -692,6 +692,15 @@ def _fetch_instagram_from_profiles(
     Recebe URLs de perfil (instagram.com/<user>/), roda 1 run do Apify com resultsType=posts
     e transforma os itens retornados no mesmo formato do _fetch_instagram.
     """
+
+    def _ig_permalink_from_item(it: dict) -> Optional[str]:
+    # tenta shortCode -> permalink /p/<code>/
+    sc = it.get("shortCode") or _shortcode(it.get("url") or it.get("inputUrl") or "")
+    if sc:
+        return f"https://www.instagram.com/p/{sc}/"
+    # fallback
+    return it.get("url") or it.get("inputUrl")
+    
     apify_client, _, _ = get_clients()
     # normaliza + dedup perfis
     profiles = list(dict.fromkeys(_normalize_ig_profile_url(u) for u in profile_urls if _is_ig_profile_url(u)))
@@ -774,9 +783,10 @@ def _fetch_instagram_from_profiles(
                         # caption + tags/mentions
                         caption = it.get("caption") or ""
                         hashtags, mentions = _extract_tags_and_mentions(caption) if " _extract_tags_and_mentions" in globals() else ([], [])
+                        permalink = _ig_permalink_from_item(it)
 
                         out.append({
-                            "url": _ig_post_url_from_item(it),
+                            "url": permalink,
                             "ownerUsername": it.get("ownerUsername") or it.get("username"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
@@ -792,6 +802,7 @@ def _fetch_instagram_from_profiles(
                             "mediaUrl": m_urls if len(m_urls) > 1 else (m_urls[0] if m_urls else None),
                             "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                             "mediaLocalPath": local_paths[0] if local_paths else None,
+                            "_source_profile": _normalize_ig_profile_url(profile_url),
                         })
 
                         if len(out) >= max_results:
@@ -1012,22 +1023,29 @@ def _merge_results_in_input_order(
     known_map: Dict[str, dict],
     fetched_new_items: List[Dict[str, Optional[str]]]
 ) -> List[Dict[str, Optional[str]]]:
-    # Índices por identidade e por URL normalizada
+    # Índices por identidade/URL e também por perfil (quando vier de perfis)
     fetched_by_id: Dict[Tuple[str, str], dict] = {}
     fetched_by_norm_url: Dict[str, dict] = {}
+    by_profile: Dict[str, List[dict]] = {}
 
-    for it in fetched_new_items or []:
-        # tente várias origens de URL que podem estar presentes
-        cand_urls = []
+    def _cand_urls(it: dict) -> List[str]:
+        cand = []
         for k in ("url", "inputUrl", "webVideoUrl", "shareUrl"):
             v = it.get(k)
-            if isinstance(v, str) and v:
-                cand_urls.append(v)
-        # de-duplicar mantendo ordem
+            if isinstance(v, str) and v.strip():
+                cand.append(v.strip())
+        # de-dup preservando ordem
         seen = set()
-        cand_urls = [u for u in cand_urls if not (u in seen or seen.add(u))]
-        # indexar
-        for u in cand_urls:
+        return [u for u in cand if not (u in seen or seen.add(u))]
+
+    for it in fetched_new_items or []:
+        # index por perfil de origem (se a rotina de perfis setar esse campo)
+        sp = it.get("_source_profile")
+        if isinstance(sp, str) and sp:
+            by_profile.setdefault(sp, []).append(it)
+
+        # index por identidade e url normalizada
+        for u in _cand_urls(it):
             pid = _post_identity(u)
             if pid and pid not in fetched_by_id:
                 fetched_by_id[pid] = it
@@ -1038,30 +1056,44 @@ def _merge_results_in_input_order(
     results: List[Dict[str, Optional[str]]] = []
 
     for u in input_urls:
-        # 1) se já está no Mongo (chave por URL exata como já estava)
+        # 1) reaproveita do Mongo
         if u in known_map:
             doc = {k: known_map[u].get(k) for k in MONGO_FETCH_FIELDS}
+            doc["url"] = u  # aqui manter a URL de entrada (é o que já estava salvo)
             doc["_from_mongo"] = True
             results.append(doc)
             continue
 
-        # 2) procurar por identidade estável
+        # 2) se a URL de entrada é perfil → "fan-out": devolve TODOS os posts daquele perfil
+        if _is_ig_profile_url(u):
+            prof_key = _normalize_ig_profile_url(u)
+            posts = by_profile.get(prof_key, [])
+            for it in posts:
+                row = {k: it.get(k) for k in OUTPUT_FIELDS}
+                # NÃO sobrescreva a url; se não vier, tente derivar
+                if not row.get("url"):
+                    row["url"] = it.get("url") or it.get("inputUrl") or u
+                row["_from_mongo"] = False
+                results.append(row)
+            # se não houver nada, ainda devolve um placeholder
+            if not posts:
+                results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
+            continue
+
+        # 3) caso normal (post único): tenta por identidade e por URL normalizada
         pid = _post_identity(u)
         it = fetched_by_id.get(pid) if pid else None
-
-        # 3) fallback para URL normalizada
         if not it:
             it = fetched_by_norm_url.get(_normalize_url(u))
 
         if it:
             row = {k: it.get(k) for k in OUTPUT_FIELDS}
-            # Garanta que a 'url' de saída preserve a solicitada,
-            # para manter a ordem e facilitar rastreio
-            row["url"] = u
+            # >>> AQUI O AJUSTE-CHAVE: não force "url" a ser a URL de entrada; mantenha o permalink do post
+            if not row.get("url"):
+                row["url"] = it.get("url") or it.get("inputUrl") or u
             row["_from_mongo"] = False
             results.append(row)
         else:
-            # não encontrado em lugar algum → placeholder
             results.append({"url": u, **{k: None for k in OUTPUT_FIELDS if k != "url"}, "_from_mongo": False})
 
     return results
@@ -1397,6 +1429,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
