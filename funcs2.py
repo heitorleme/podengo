@@ -708,7 +708,7 @@ def _fetch_instagram_from_profiles(
     """
 
     def _ig_permalink_from_item(it: dict) -> Optional[str]:
-        sc = it.get("shortCode") or _shortcode(it.get("url"))
+        sc = it.get("shortCode") or _shortcode(it.get("url") or it.get("inputUrl") or "")
         if sc:
             return f"https://www.instagram.com/p/{sc}/"
         return it.get("url") or it.get("inputUrl")
@@ -772,8 +772,10 @@ def _fetch_instagram_from_profiles(
                             m_urls.append(it["displayUrl"])
                         if it.get("images"):
                             m_urls.extend(_ensure_list(it["images"]))
-                        # remove duplicados preservando ordem
-                        seen_mu, m_urls = set(), [u for u in m_urls if not (u in seen_mu or seen_mu.add(u))]
+
+                        # deduplicação preservando ordem
+                        seen_mu = set()
+                        m_urls = [u for u in m_urls if not (u in seen_mu or seen_mu.add(u))]
 
                         local_paths: List[str] = []
                         for mu in m_urls:
@@ -808,7 +810,7 @@ def _fetch_instagram_from_profiles(
                             _normalize_ig_profile_url(f"https://www.instagram.com/{owner}/") if owner else None
                         )
 
-                        out.append({
+                        row = {
                             "url": permalink,
                             "ownerUsername": owner,
                             "likesCount": it.get("likesCount"),
@@ -826,7 +828,8 @@ def _fetch_instagram_from_profiles(
                             "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                             "mediaLocalPath": local_paths[0] if local_paths else None,
                             "_source_profile": source_profile,
-                        })
+                        }
+                        out.append(row)
 
                         if len(out) >= max_results:
                             tlog(f"[IG][PROFILES] ⛔ max_results atingido.")
@@ -1069,7 +1072,6 @@ def _merge_results_in_input_order(
             v = it.get(k)
             if isinstance(v, str) and v.strip():
                 cand.append(v.strip())
-        # de-dup preservando ordem
         seen = set()
         return [u for u in cand if not (u in seen or seen.add(u))]
 
@@ -1092,52 +1094,61 @@ def _merge_results_in_input_order(
     for u in input_urls:
         # 1) reaproveita do Mongo
         if u in known_map:
-            doc = {k: known_map[u].get(k) for k in MONGO_FETCH_FIELDS}
-            doc["url"] = u  # aqui manter a URL de entrada (Mongo já tinha salvo assim)
+            doc = {k: known_map[u].get(k) if k in known_map[u] else None for k in MONGO_FETCH_FIELDS}
+            doc["url"] = u
             doc["_from_mongo"] = True
+            doc.setdefault("hashtags", [])
+            doc.setdefault("mentions", [])
             results.append(doc)
             continue
 
-        # 2) se a URL de entrada é perfil → "fan-out": devolve TODOS os posts daquele perfil
+        # 2) fan-out para perfis IG
         if _is_ig_profile_url(u):
             prof_key = _normalize_ig_profile_url(u)
             posts = by_profile.get(prof_key, [])
             for it in posts:
-                row = {k: it.get(k) for k in OUTPUT_FIELDS}
-                # não sobrescreva a url: mantenha permalink se já existe
+                row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
                 if not row.get("url"):
                     row["url"] = it.get("inputUrl") or u
                 row["_from_mongo"] = False
+                row.setdefault("hashtags", [])
+                row.setdefault("mentions", [])
                 results.append(row)
             if not posts:
-                results.append({
-                    "url": u,
-                    **{k: None for k in OUTPUT_FIELDS if k != "url"},
-                    "_from_mongo": False
-                })
+                placeholder = {"url": u, "_from_mongo": False}
+                for k in OUTPUT_FIELDS:
+                    if k != "url":
+                        placeholder[k] = None
+                placeholder["hashtags"] = []
+                placeholder["mentions"] = []
+                results.append(placeholder)
             continue
 
-        # 3) caso normal (post único): tenta por identidade e por URL normalizada
+        # 3) caso normal (post único)
         pid = _post_identity(u)
         it = fetched_by_id.get(pid) if pid else None
         if not it:
             it = fetched_by_norm_url.get(_normalize_url(u))
 
         if it:
-            row = {k: it.get(k) for k in OUTPUT_FIELDS}
-            # mantém permalink se existir
+            row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
             if not row.get("url"):
                 row["url"] = it.get("inputUrl") or u
             row["_from_mongo"] = False
+            row.setdefault("hashtags", [])
+            row.setdefault("mentions", [])
             results.append(row)
         else:
-            results.append({
-                "url": u,
-                **{k: None for k in OUTPUT_FIELDS if k != "url"},
-                "_from_mongo": False
-            })
+            placeholder = {"url": u, "_from_mongo": False}
+            for k in OUTPUT_FIELDS:
+                if k != "url":
+                    placeholder[k] = None
+            placeholder["hashtags"] = []
+            placeholder["mentions"] = []
+            results.append(placeholder)
 
     return results
+
 
 def _tipo_midia_url(url: Optional[str]) -> str:
     if not url:
@@ -1478,6 +1489,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
