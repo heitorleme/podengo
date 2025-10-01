@@ -428,6 +428,13 @@ POLL_SEC = 2  # polling em segundos
 
 IG_PROFILE_RESERVED = {"p", "reel", "reels", "stories", "explore", "tv"}
 
+def _any_post_url(i: dict) -> str:
+    for k in ("submittedVideoUrl", "webVideoUrl", "url", "shareUrl", "inputUrl"):
+        v = i.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
 def _is_ig_profile_url(u: Optional[str]) -> bool:
     if not u or "instagram.com" not in u:
         return False
@@ -688,19 +695,16 @@ def _fetch_instagram_from_profiles(
     results_limit: int = 5,
     max_results: int = 1000,
 ) -> List[Dict[str, Optional[str]]]:
-    """
-    Recebe URLs de perfil (instagram.com/<user>/), roda 1 run do Apify com resultsType=posts
-    e transforma os itens retornados no mesmo formato do _fetch_instagram.
-    """
 
+    # --- helper corrigida/indentada ---
     def _ig_permalink_from_item(it: dict) -> Optional[str]:
-    # tenta shortCode -> permalink /p/<code>/
-    sc = it.get("shortCode") or _shortcode(it.get("url") or it.get("inputUrl") or "")
-    if sc:
-        return f"https://www.instagram.com/p/{sc}/"
-    # fallback
-    return it.get("url") or it.get("inputUrl")
-    
+        # tenta shortCode -> permalink /p/<code>/
+        sc = it.get("shortCode") or _shortcode(it.get("url") or it.get("inputUrl") or "")
+        if sc:
+            return f"https://www.instagram.com/p/{sc}/"
+        # fallback
+        return it.get("url") or it.get("inputUrl")
+
     apify_client, _, _ = get_clients()
     # normaliza + dedup perfis
     profiles = list(dict.fromkeys(_normalize_ig_profile_url(u) for u in profile_urls if _is_ig_profile_url(u)))
@@ -708,44 +712,8 @@ def _fetch_instagram_from_profiles(
         tlog("[IG][PROFILES] Nenhum perfil válido.")
         return []
 
-    tlog(f"[IG][PROFILES] ▶️ Run único ({len(profiles)} perfis) | limit={results_limit}")
-    run = apify_client.actor(INSTAGRAM_ACTOR).start(
-        run_input={
-            "addParentData": False,
-            "directUrls": profiles,
-            "enhanceUserSearchWithFacebookPage": False,
-            "isUserReelFeedURL": False,
-            "isUserTaggedFeedURL": False,
-            "resultsLimit": int(results_limit),
-            "resultsType": "posts",
-        }
-    )
-    run_id = run.get("id")
-    if not run_id:
-        tlog("[IG][PROFILES] ❌ Sem run_id.")
-        return []
+    # ...
 
-    ds = None
-    ds_id = None
-    offset = 0
-    out: List[Dict[str, Optional[str]]] = []
-    no_new_ticks = 0
-
-    while True:
-        info = apify_client.run(run_id).get()
-        status = info.get("status")
-        if not ds_id:
-            ds_id = info.get("defaultDatasetId")
-            if ds_id:
-                ds = apify_client.dataset(ds_id)
-                tlog(f"[IG][PROFILES] 🟡 status={status}, dataset={ds_id}")
-
-        if ds_id:
-            page = ds.list_items(limit=200, offset=offset, clean=True)
-            items = _page_items(page)
-            if items:
-                tlog(f"[IG][PROFILES] 📥 +{len(items)} (offset {offset}→{offset+len(items)})")
-                offset += len(items)
                 for it in items:
                     try:
                         # mídia
@@ -780,14 +748,19 @@ def _fetch_instagram_from_profiles(
                                 "plataforma": "Instagram",
                             }
 
-                        # caption + tags/mentions
                         caption = it.get("caption") or ""
-                        hashtags, mentions = _extract_tags_and_mentions(caption) if " _extract_tags_and_mentions" in globals() else ([], [])
+                        # <<< remover a checagem bizarra por string; a função existe
+                        hashtags, mentions = _extract_tags_and_mentions(caption)
+
                         permalink = _ig_permalink_from_item(it)
+
+                        # --- Fonte do perfil: constrói a partir do ownerUsername ---
+                        owner = it.get("ownerUsername") or it.get("username")
+                        source_profile = _normalize_ig_profile_url(f"https://www.instagram.com/{owner}/") if owner else None
 
                         out.append({
                             "url": permalink,
-                            "ownerUsername": it.get("ownerUsername") or it.get("username"),
+                            "ownerUsername": owner,
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
                             "caption": caption,
@@ -802,7 +775,7 @@ def _fetch_instagram_from_profiles(
                             "mediaUrl": m_urls if len(m_urls) > 1 else (m_urls[0] if m_urls else None),
                             "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                             "mediaLocalPath": local_paths[0] if local_paths else None,
-                            "_source_profile": _normalize_ig_profile_url(profile_url),
+                            "_source_profile": source_profile,
                         })
 
                         if len(out) >= max_results:
@@ -810,19 +783,20 @@ def _fetch_instagram_from_profiles(
                             return out[:max_results]
                     except Exception as e:
                         tlog(f"[IG][PROFILES] ❌ Erro processando item: {e}")
-                no_new_ticks = 0
-            else:
-                no_new_ticks += 1
 
-        if status in {"RUNNING", "READY"}:
-            tlog(f"[IG][PROFILES] ⏳ status={status}, recebidos={len(out)}")
-        else:
-            tlog(f"[IG][PROFILES] 🧭 status final={status}, total={len(out)}")
-            if no_new_ticks >= 2:
-                break
-        time.sleep(POLL_SEC)
+# --- no merge: nenhuma mudança lógica, mas garanta que as chaves de perfil batem ---
+# já está usando _normalize_ig_profile_url em ambas as pontas
 
-    tlog(f"[IG][PROFILES] 🏁 Concluído com {len(out)} resultado(s)")
+# 4) (opcional) De-dup no final de fetch_social_post_summary_async, antes do return:
+def _dedup_results(rows: List[dict]) -> List[dict]:
+    seen = set()
+    out = []
+    for r in rows:
+        key = (r.get("url"), r.get("ownerUsername"), r.get("timestamp"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
     return out
 
 def _tt_id(u: str) -> Optional[str]:
@@ -1402,6 +1376,7 @@ async def fetch_social_post_summary_async(
         results = results[:max_results]
 
     tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
+    results = _dedup_results(results)
     return results
 
 async def rodar_pipeline(urls: List[str]) -> List[dict]:
@@ -1429,6 +1404,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
