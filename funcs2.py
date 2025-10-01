@@ -428,6 +428,42 @@ POLL_SEC = 2  # polling em segundos
 
 IG_PROFILE_RESERVED = {"p", "reel", "reels", "stories", "explore", "tv"}
 
+APIFY_KV_COOLDOWN_SEC = 2  # tempo para o Apify materializar o arquivo no KV após o dataset
+APIFY_KV_MAX_RETRY = 6      # tentativas (exponenciais)
+APIFY_KV_INITIAL_DELAY = 2  # segundos
+
+def _download_file_with_retry(url: str, pasta_destino: str = media,
+                              max_retry: int = APIFY_KV_MAX_RETRY,
+                              initial_delay: int = APIFY_KV_INITIAL_DELAY) -> str:
+    """
+    Baixa com retries exponenciais, tratando 404/403 de propagação do KV do Apify.
+    Retorna caminho local ou lança a última exceção se falhar em todas as tentativas.
+    """
+    delay = initial_delay
+    last_err = None
+    for attempt in range(1, max_retry + 1):
+        try:
+            return _download_file(url, pasta_destino=pasta_destino)
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            last_err = e
+            # 404/403 são os mais comuns durante a propagação; aguarda e tenta de novo
+            if status in (403, 404):
+                tlog(f"[DL][retry {attempt}/{max_retry}] {status} para {url.split('?')[0]} — aguardando {delay}s…")
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            # outros status → não insiste
+            raise
+        except Exception as e:
+            last_err = e
+            tlog(f"[DL][retry {attempt}/{max_retry}] erro '{type(e).__name__}' em {url.split('?')[0]} — aguardando {delay}s…")
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+    # se chegou aqui, esgotou
+    raise last_err if last_err else RuntimeError("Falha desconhecida no download")
+
+
 def _any_post_url(i: dict) -> str:
     for k in ("submittedVideoUrl", "webVideoUrl", "url", "shareUrl", "inputUrl"):
         v = i.get(k)
@@ -1080,21 +1116,14 @@ def _fetch_tiktok_from_profiles(
     max_results: int = 1000,
     post_urls_extra: Optional[List[str]] = None,
 ) -> List[Dict[str, Optional[str]]]:
-    """
-    Usa clockworks/tiktok-scraper com 'profiles' (usernames extraídos de links completos).
-    Normaliza a saída para o schema do pipeline e associa cada item ao perfil de origem
-    usando o campo 'input' do item (username que disparamos para o actor).
-    """
     apify_client, _, _ = get_clients()
 
-    # 1) Aceita APENAS links completos de perfil; extrai usernames e guarda o mapa username->perfil
+    # 1) Aceita SÓ links completos de perfil e extrai usernames, mapeando para a URL normalizada
     username_to_profile_url: Dict[str, str] = {}
     ignorados: List[str] = []
-
     for raw in profile_urls or []:
         if not isinstance(raw, str) or not raw.strip():
             ignorados.append(str(raw)); continue
-
         u = raw.strip()
         if "tiktok.com" not in u:
             ignorados.append(u); continue
@@ -1102,28 +1131,24 @@ def _fetch_tiktok_from_profiles(
             u = "https://" + u
         if not _is_tt_profile_url(u):
             ignorados.append(u); continue
-
-        u_norm = _normalize_tt_profile_url(u)
+        u_norm = _normalize_tt_profile_url(u)  # sempre com barra final
         un = _tt_username_from_url(u_norm)
         if un:
-            # preferimos a URL normalizada original fornecida pelo usuário
             username_to_profile_url.setdefault(un, u_norm)
         else:
             ignorados.append(u)
 
     usernames = list(username_to_profile_url.keys())
     if ignorados:
-        tlog(f"[TT][PROFILES] Ignorados (não são links completos de perfil): {len(ignorados)}")
-
+        tlog(f"[TT][PROFILES] Ignorados (não são links completos): {len(ignorados)}")
     if not usernames:
-        tlog("[TT][PROFILES] ❌ Nenhum link completo de perfil válido.")
+        tlog("[TT][PROFILES] ❌ Nenhum perfil válido.")
         return []
 
-    # 2) Monta input do actor exatamente no formato esperado
     run_input = {
         "excludePinnedPosts": False,
         "postURLs": list(dict.fromkeys((post_urls_extra or []))),
-        "profiles": usernames,  # << só usernames
+        "profiles": usernames,  # apenas usernames
         "proxyCountryCode": "None",
         "resultsPerPage": int(results_limit),
         "scrapeRelatedVideos": False,
@@ -1144,8 +1169,9 @@ def _fetch_tiktok_from_profiles(
 
     ds, ds_id, offset = None, None, 0
     out: List[Dict[str, Optional[str]]] = []
-    no_new_ticks = 0
+    cache_media_candidates: List[Tuple[int, List[str], bool]] = []  # (idx_out, candidates, is_slideshow)
     per_user_count: Dict[str, int] = {}
+    no_new_ticks = 0
 
     while True:
         info = apify_client.run(run_id).get()
@@ -1165,54 +1191,25 @@ def _fetch_tiktok_from_profiles(
 
                 for it in items:
                     try:
-                        # 2.1) Determina o perfil de origem de forma robusta via 'input' (username enviado ao actor)
-                        # O payload real do actor inclui "input": "<username>"
-                        src_username = (it.get("input") or "").strip() or \
-                                       ((it.get("authorMeta") or {}).get("name") or "").strip()
+                        # associa ao perfil de origem via 'input' (username enviado)
+                        src_username = (it.get("input") or "").strip() or ((it.get("authorMeta") or {}).get("name") or "").strip()
+                        src_profile_url = username_to_profile_url.get(src_username) or (_normalize_tt_profile_url(f"https://www.tiktok.com/@{src_username}/") if src_username else None)
 
-                        src_profile_url = None
-                        if src_username in username_to_profile_url:
-                            src_profile_url = username_to_profile_url[src_username]
-                        elif src_username:
-                            # fallback se não estava no mapa por algum motivo
-                            src_profile_url = _normalize_tt_profile_url(f"https://www.tiktok.com/@{src_username}/")
-
-                        # 2.2) Mídias — prioriza downloadAddr e webVideoUrl
+                        # candidatos de mídia (prioriza downloadAddr)
                         def _ensure_list(x):
                             if not x: return []
                             if isinstance(x, (list, tuple)): return list(x)
                             return [x]
-
                         media_candidates: List[str] = []
                         dl_vm = (it.get("videoMeta") or {}).get("downloadAddr")
                         if isinstance(dl_vm, str) and dl_vm.strip():
                             media_candidates.append(dl_vm.strip())
                         media_candidates += [u for u in _ensure_list(it.get("mediaUrls")) if isinstance(u, str) and u.strip()]
-
-                        # dedup preservando ordem
                         seen_mu = set()
                         media_candidates = [u for u in media_candidates if not (u in seen_mu or seen_mu.add(u))]
-
-                        # downloads (mas mesmo se falhar, mantemos o item)
-                        local_paths: List[str] = []
-                        first_ok_path: Optional[str] = None
                         is_slideshow = bool(it.get("isSlideshow"))
-                        for mu in media_candidates:
-                            try:
-                                lp = _download_file(mu, pasta_destino=media)
-                                if lp and os.path.isfile(lp):
-                                    local_paths.append(lp)
-                                    if not first_ok_path:
-                                        first_ok_path = lp
-                                    tlog(f"[TT][PROFILES][DL] ✅ ok → {os.path.basename(lp)}")
-                                    if not is_slideshow:
-                                        break
-                            except Exception as e:
-                                tlog(f"[TT][PROFILES][DL] ⚠️ {mu.split('?')[0]} | {e}")
 
-                        _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
-
-                        # 2.3) Áudio
+                        # áudio
                         mm = (it.get("musicMeta") or {})
                         audio_id = None
                         author_name = None
@@ -1223,31 +1220,24 @@ def _fetch_tiktok_from_profiles(
                                 audio_id = f"tt_{_raw_music_id}"
                             author_name = mm.get("musicAuthor")
                             audio_name = mm.get("musicName")
-
                         audio_snapshot = None
                         if audio_id is not None or author_name is not None or audio_name is not None:
-                            audio_snapshot = {
-                                "author_name": author_name,
-                                "audio_name": audio_name,
-                                "plataforma": "Tiktok",
-                            }
+                            audio_snapshot = {"author_name": author_name, "audio_name": audio_name, "plataforma": "Tiktok"}
 
-                        # 2.4) Texto/hashtags
+                        # texto/hashtags
                         caption = (it.get("text") or it.get("description") or "") or ""
                         hashtags_cap, mentions_cap = _extract_tags_and_mentions(caption)
-
-                        # Se o actor já trouxe hashtags como objetos, mesclamos os nomes
                         h_objs = it.get("hashtags") or []
                         if isinstance(h_objs, list):
                             h_names = [h.get("name") for h in h_objs if isinstance(h, dict) and h.get("name")]
                         else:
                             h_names = []
                         hashtags = _dedup_preservando_ordem(list(hashtags_cap) + h_names)
-                        mentions = mentions_cap  # (o actor também pode trazer 'mentions', mas já extraímos do texto)
+                        mentions = mentions_cap
 
-                        # 2.5) Campos canônicos
                         owner = ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId")
                         permalink = it.get("webVideoUrl") or it.get("url") or it.get("inputUrl")
+                        _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
                         row = {
                             "url": permalink,
@@ -1264,23 +1254,24 @@ def _fetch_tiktok_from_profiles(
                             "audio_id": audio_id,
                             "audio_snapshot": audio_snapshot,
                             "mediaUrl": media_candidates if len(media_candidates) > 1 else (media_candidates[0] if media_candidates else None),
-                            "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
-                            "mediaLocalPath": first_ok_path,
+                            "mediaLocalPaths": None,
+                            "mediaLocalPath": None,
                             "_source_profile": src_profile_url,
                         }
                         out.append(row)
+                        cache_media_candidates.append((len(out) - 1, media_candidates, is_slideshow))
 
-                        # contagem por username (debug)
                         if src_username:
                             per_user_count[src_username] = per_user_count.get(src_username, 0) + 1
 
                         if len(out) >= max_results:
                             tlog(f"[TT][PROFILES] ⛔ max_results atingido.")
-                            return out[:max_results]
-
+                            break
                     except Exception as e:
                         tlog(f"[TT][PROFILES] ❌ Erro processando item: {e}")
-
+                # fim for items
+                if len(out) >= max_results:
+                    break
                 no_new_ticks = 0
             else:
                 no_new_ticks += 1
@@ -1291,9 +1282,34 @@ def _fetch_tiktok_from_profiles(
             tlog(f"[TT][PROFILES] 🧭 status final={status}, total={len(out)}")
             if per_user_count:
                 tlog(f"[TT][PROFILES] Resumo por username: {per_user_count}")
-            if no_new_ticks >= 2:
-                break
+            break
         time.sleep(POLL_SEC)
+
+    # ✅ COOLDOWN global após o run (deixa o KV estabilizar) + retry por URL
+    if out:
+        tlog(f"[TT][PROFILES] ⏱ cooldown {APIFY_KV_COOLDOWN_SEC}s antes dos downloads…")
+        time.sleep(APIFY_KV_COOLDOWN_SEC)
+        for idx_out, candidates, is_slideshow in cache_media_candidates:
+            if not candidates:
+                continue
+            local_paths: List[str] = []
+            first_ok: Optional[str] = None
+            for mu in candidates:
+                try:
+                    lp = _download_file_with_retry(mu, pasta_destino=media)
+                    if lp and os.path.isfile(lp):
+                        local_paths.append(lp)
+                        if not first_ok:
+                            first_ok = lp
+                        tlog(f"[TT][PROFILES][DL] ✅ ok → {os.path.basename(lp)}")
+                        if not is_slideshow:
+                            break
+                except Exception as e:
+                    tlog(f"[TT][PROFILES][DL] ⚠️ {mu.split('?')[0]} | {e}")
+            # atualiza a linha
+            if local_paths:
+                out[idx_out]["mediaLocalPaths"] = local_paths if len(local_paths) > 1 else None
+                out[idx_out]["mediaLocalPath"]  = first_ok
 
     tlog(f"[TT][PROFILES] 🏁 Concluído com {len(out)} resultado(s)")
     return out
@@ -1353,9 +1369,9 @@ def _merge_results_in_input_order(
             results.append(doc)
             continue
 
-        # 2) fan-out para perfis IG
-        if _is_ig_profile_url(u):
-            prof_key = _normalize_ig_profile_url(u)
+        # 2) fan-out para perfis IG/TT (não criar placeholder quando não houver posts)
+        if _is_ig_profile_url(u) or _is_tt_profile_url(u):
+            prof_key = _normalize_ig_profile_url(u) if "instagram.com" in u else _normalize_tt_profile_url(u)
             posts = by_profile.get(prof_key, [])
             for it in posts:
                 row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
@@ -1365,14 +1381,7 @@ def _merge_results_in_input_order(
                 row.setdefault("hashtags", [])
                 row.setdefault("mentions", [])
                 results.append(row)
-            if not posts:
-                placeholder = {"url": u, "_from_mongo": False}
-                for k in OUTPUT_FIELDS:
-                    if k != "url":
-                        placeholder[k] = None
-                placeholder["hashtags"] = []
-                placeholder["mentions"] = []
-                results.append(placeholder)
+            # ⚠️ Não adiciona placeholder para URLs de perfil (servem apenas como semente)
             continue
 
         # 3) caso normal (post único)
@@ -1390,6 +1399,7 @@ def _merge_results_in_input_order(
             row.setdefault("mentions", [])
             results.append(row)
         else:
+            # para posts (não perfis), mantemos o placeholder
             placeholder = {"url": u, "_from_mongo": False}
             for k in OUTPUT_FIELDS:
                 if k != "url":
@@ -1399,7 +1409,6 @@ def _merge_results_in_input_order(
             results.append(placeholder)
 
     return results
-
 
 def _tipo_midia_url(url: Optional[str]) -> str:
     if not url:
@@ -1757,6 +1766,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
