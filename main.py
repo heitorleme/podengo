@@ -149,6 +149,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
     for r in itens_sanitizados:
         r.pop("audio_id", None)
         r.pop("audio_snapshot", None)
+        r.pop("_from_mongo", None)
 
     df = pd.DataFrame(itens_sanitizados)
     excel_bytes, excel_name = _to_excel_bytes(df)
@@ -164,4 +165,5 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # Mantém compatibilidade com execução direta (opcional)
 if __name__ == "__main__":
     print("Este módulo agora espera ser chamado via main(urls_or_text).")
+
 
