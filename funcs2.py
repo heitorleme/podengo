@@ -522,6 +522,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
     ds_id: Optional[str] = None
     offset = 0
     out: List[Dict[str, Optional[str]]] = []
+    out_audio: List[Dict[str, Optional[str]]] = []
     no_new_ticks = 0
 
     while True:
@@ -565,6 +566,13 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                                     local_paths.append(lp)
                             except Exception as e:
                                 tlog(f"[IG] ⚠️ Falha ao baixar {mu}: {e}")
+                        # extrai info de áudio de forma segura
+                        _audio = it.get("musicInfo", {}) or {}
+                        _raw_audio_id = _audio.get("audio_id")
+                        audio_id = f"ig_{_raw_audio_id}" if _raw_audio_id is not None else None
+                        artist_name = _audio.get("artist_name")
+                        song_name = _audio.get("song_name")
+                        
                         out.append({
                             "url": it.get("inputUrl") or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
@@ -575,10 +583,21 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                             "timestamp": it.get("timestamp"),
                             "videoPlayCount": it.get("videoPlayCount"),
                             "videoViewCount": it.get("videoViewCount"),
+                            "audio_id": audio_id,  # agora seguro
                             "mediaUrl": m_urls if len(m_urls) > 1 else (m_urls[0] if m_urls else None),
                             "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                             "mediaLocalPath": local_paths[0] if local_paths else None,
                         })
+                        
+                        # só adiciona em out_audio se tiver algum dado relevante
+                        if audio_id is not None or artist_name is not None or song_name is not None:
+                            out_audio.append({
+                                "audio_id": audio_id,
+                                "author_name": artist_name,
+                                "audio_name": song_name,
+                                "plataforma": "Instagram",
+                            })
+
                         if len(out) % 25 == 0:
                             tlog(f"[IG] ✅ {len(out)} item(ns) processado(s)")
                         if len(out) >= max_results:
@@ -686,6 +705,7 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
     time.sleep(2)
 
     out: List[Dict[str, Optional[str]]] = []
+    out_audio: List[Dict[str, Optional[str]]] = []
     for it in (i for i in items_total if _match(i)):
         try:
             def _ensure_list(x):
@@ -726,6 +746,18 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
 
             _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
+            try:
+                mm = it.get("musicMeta")
+            except:
+                mm = None
+
+            _raw_music_id = mm.get("musicId")
+            if _raw_music_id is not None:
+                audio_id = f"tt_{_raw_music_id}"
+                author_name = mm.get("musicAuthor")
+                audio_name = mm.get("musicName")
+                plataforma = "Tiktok"
+            
             out.append({
                 "url": it.get("inputUrl") or _any_post_url(it),
                 "ownerUsername": ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId"),
@@ -736,10 +768,19 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
                 "timestamp": it.get("createTimeISO") or it.get("createTime"),
                 "videoPlayCount": it.get("playCount"),
                 "videoViewCount": it.get("playCount"),
+                "audio_id": audio_id,
                 "mediaUrl": media_candidates if len(media_candidates) > 1 else (media_candidates[0] if media_candidates else None),
                 "mediaLocalPaths": local_paths if len(local_paths) > 1 else None,
                 "mediaLocalPath": first_ok_path,
             })
+
+            if audio_id is not None or artist_name is not None or song_name is not None:
+                out_audio.append({
+                    "audio_id": audio_id,
+                    "author_name": author_name,
+                    "audio_name": audio_name,
+                    "plataforma": plataforma
+                })
 
             if media_candidates and not first_ok_path:
                 tlog(f"[TT] ⚠️ Nenhum arquivo salvo — candidatos={len(media_candidates)}; ex={media_candidates[0].split('?')[0]}")
@@ -1112,6 +1153,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
