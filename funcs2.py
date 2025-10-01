@@ -169,7 +169,7 @@ def tlog(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "timestamp", "transcricao", "framesDescricao"]
 MEDIA_FIELDS  = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
-OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount", "audio_id"]
+OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount", "audio_id", "audio_snapshot", "hashtags", "mentions"]
 MONGO_FETCH_FIELDS = MONGO_FIELDS + OTHER_FIELDS
 OUTPUT_FIELDS = MONGO_FIELDS + MEDIA_FIELDS + OTHER_FIELDS
 
@@ -267,6 +267,25 @@ def upload_muitos_para_mongo(resultados: List[dict]) -> dict:
     except BulkWriteError as e:
         ok = e.details.get("nInserted", 0)
         return {"inserted": ok, "skipped": len(resultados) - ok}
+
+
+regex_hashtags  = re.compile(r"#\w+", re.UNICODE)
+regex_mentions  = re.compile(r"@\w+", re.UNICODE)
+
+def _dedup_preservando_ordem(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+def _extract_tags_and_mentions(caption: str):
+    caption = caption or ""
+    hashtags = _dedup_preservando_ordem([h.lstrip("#") for h in regex_hashtags.findall(caption)])
+    mentions = _dedup_preservando_ordem([m.lstrip("@") for m in regex_mentions.findall(caption)])
+    return hashtags, mentions
 
 # ─────────────────────────────────────────────────────────────
 # Áudio / Transcrição
@@ -586,17 +605,22 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                                 "audio_name": song_name,
                                 "plataforma": "Instagram",
                             }
+
+                        caption = it.get("caption")
+                        hashtags, mentions = _extract_tags_and_mentions(caption)
                         
                         out.append({
                             "url": it.get("inputUrl") or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
-                            "caption": it.get("caption"),
+                            "caption": caption,
                             "type": it.get("type"),
                             "timestamp": it.get("timestamp"),
                             "videoPlayCount": it.get("videoPlayCount"),
                             "videoViewCount": it.get("videoViewCount"),
+                            "hashtags": hashtags,
+                            "mentions": mentions,
                             "audio_id": audio_id,
                             "audio_snapshot": audio_snapshot,
                             "mediaUrl": m_urls if len(m_urls) > 1 else (m_urls[0] if m_urls else None),
@@ -775,17 +799,21 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
                     "audio_name": audio_name,
                     "plataforma": plataforma
                 }
-            
+
+            caption = (it.get("text") or it.get("description") or "")
+            hashtags, mentions = _extract_tags_and_mentions(caption)
             out.append({
                 "url": it.get("inputUrl") or _any_post_url(it),
                 "ownerUsername": ((it.get("authorMeta") or {}).get("name")) or it.get("authorUniqueId"),
                 "likesCount": it.get("diggCount"),
                 "commentsCount": it.get("commentCount"),
-                "caption": it.get("text") or it.get("description"),
+                "caption": caption,
                 "type": _type,
                 "timestamp": it.get("createTimeISO") or it.get("createTime"),
                 "videoPlayCount": it.get("playCount"),
                 "videoViewCount": it.get("playCount"),
+                "hashtags": hashtags,
+                "mentions": mentions,
                 "audio_id": audio_id,
                 "audio_snapshot": audio_snapshot,
                 "mediaUrl": media_candidates if len(media_candidates) > 1 else (media_candidates[0] if media_candidates else None),
@@ -1164,6 +1192,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
