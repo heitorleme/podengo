@@ -1381,13 +1381,11 @@ async def fetch_social_post_summary_async(
 
     known_map, unknown_set = _partition_known_unknown_by_mongo(input_urls)
 
-    # separa perfis e posts do IG
     urls_instagram_profiles = [u for u in input_urls if "instagram.com" in u and _is_ig_profile_url(u)]
     urls_instagram_posts    = [u for u in input_urls if "instagram.com" in u and _shortcode(u)]
     urls_tiktok             = [u for u in input_urls if "tiktok.com" in u]
     urls_static             = [u for u in input_urls if "https://static-resources" in u]
 
-    # só buscamos de fato o que não está no Mongo (para posts IG/TT). Perfis sempre viram posts novos.
     urls_instagram_posts = [u for u in urls_instagram_posts if u in unknown_set]
     urls_tiktok          = [u for u in urls_tiktok if u in unknown_set]
     urls_static          = [u for u in urls_static if u in unknown_set]
@@ -1405,7 +1403,6 @@ async def fetch_social_post_summary_async(
         tasks.append(asyncio.to_thread(_fetch_instagram, urls_instagram_posts, api_token, max_results))
     if urls_instagram_profiles:
         tlog("[FETCH] Agendando fetch IG (perfis→posts)…")
-        # results_limit=5 conforme seu exemplo (ajuste se quiser expor como parâmetro)
         tasks.append(asyncio.to_thread(_fetch_instagram_from_profiles, urls_instagram_profiles, api_token, 5, max_results))
     if urls_tiktok:
         tlog("[FETCH] Agendando fetch TikTok…")
@@ -1420,10 +1417,9 @@ async def fetch_social_post_summary_async(
         for p in parts:
             fetched_new_items.extend(p or [])
 
-    # merge normal (mapeia 1:1 URLs de post pedidas)
     results = _merge_results_in_input_order(input_urls, known_map, fetched_new_items)
 
-    # remove placeholders vazios para URLs de perfil (não há 1:1)
+    # remove placeholders vazios de perfis
     profile_set = set(_normalize_ig_profile_url(u) for u in urls_instagram_profiles)
     def _is_placeholder_for_profile(row: dict) -> bool:
         u = row.get("url") or ""
@@ -1433,35 +1429,39 @@ async def fetch_social_post_summary_async(
             nu = u
         if nu not in profile_set:
             return False
-        # placeholder: todos campos None (exceto url, _from_mongo)
         return all(row.get(k) is None for k in OUTPUT_FIELDS if k != "url")
 
     results = [r for r in results if not _is_placeholder_for_profile(r)]
 
-    # garante que posts vindos dos perfis entrem mesmo se não foram mapeados
+    # garante inclusão de posts que não foram mapeados
     seen_urls = set(r.get("url") for r in results if r.get("url"))
     for it in fetched_new_items:
         u = it.get("url")
         if u and u not in seen_urls:
-            # mantém mesmo schema
-            row = {k: it.get(k) for k in OUTPUT_FIELDS}
+            row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
             row["url"] = u
             row["_from_mongo"] = False
+            row.setdefault("hashtags", [])
+            row.setdefault("mentions", [])
             results.append(row)
             seen_urls.add(u)
+
+    # ⚠️ Deduplicação final (url + ownerUsername + timestamp)
+    unique: Dict[Tuple[str, Optional[str], Optional[str]], dict] = {}
+    for r in results:
+        key = (
+            str(r.get("url") or "").rstrip("/"),
+            r.get("ownerUsername"),
+            str(r.get("timestamp") or r.get("post_timestamp") or ""),
+        )
+        if key not in unique:
+            unique[key] = r
+    results = list(unique.values())
 
     if len(results) > max_results:
         results = results[:max_results]
 
     tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
-    seen = set()
-    deduped = []
-    for r in results:
-        u = r.get("url")
-        if u and u not in seen:
-            deduped.append(r)
-            seen.add(u)
-    results = deduped
     return results
 
 async def rodar_pipeline(urls: List[str]) -> List[dict]:
@@ -1489,6 +1489,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
