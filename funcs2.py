@@ -1009,7 +1009,6 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
     time.sleep(2)
 
     out: List[Dict[str, Optional[str]]] = []
-    out_audio: List[Dict[str, Optional[str]]] = []
     for it in (i for i in items_total if _match(i)):
         try:
             def _ensure_list(x):
@@ -1050,24 +1049,21 @@ def _fetch_tiktok(urls_tiktok: List[str], api_token: str, max_results: int) -> L
 
             _type = "Slideshow" if is_slideshow or len(media_candidates) > 1 else "Video"
 
-            try:
-                mm = it.get("musicMeta")
-            except:
-                mm = None
-
+            # --- musicMeta seguro + variáveis corretas
+            mm = it.get("musicMeta") or {}
             _raw_music_id = mm.get("musicId")
-            audio_id = None
-            author_name = None
-            audio_name = None
+            audio_id: Optional[str] = None
+            author_name: Optional[str] = None
+            audio_name: Optional[str] = None
             plataforma = "Tiktok"
-            
+
             if _raw_music_id is not None:
                 audio_id = f"tt_{_raw_music_id}"
-                author_name = mm.get("musicAuthor")
-                audio_name = mm.get("musicName")
+            author_name = mm.get("musicAuthor")
+            audio_name = mm.get("musicName")
 
             audio_snapshot = None
-            if audio_id is not None or artist_name is not None or song_name is not None:
+            if audio_id is not None or author_name is not None or audio_name is not None:
                 audio_snapshot = {
                     "author_name": author_name,
                     "audio_name": audio_name,
@@ -1421,6 +1417,20 @@ def _tipo_midia_url(url: Optional[str]) -> str:
     return tipo
 
 def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths: Any = None) -> Optional[str]:
+    """
+    Escolhe a melhor fonte de mídia para processamento.
+    🔁 Prioriza ARQUIVOS LOCAIS (necessários para transcrição e extração de frames),
+    depois cai para URLs remotas como fallback.
+    """
+    # 1) Prioriza caminhos locais (o worker depende disso)
+    if isinstance(media_local_path, str) and media_local_path:
+        return media_local_path
+    if isinstance(media_local_paths, (list, tuple)):
+        for p in media_local_paths:
+            if isinstance(p, str) and p:
+                return p
+
+    # 2) Fallback: URLs remotas (não usadas pelo worker para abrir arquivo, mas útil p/ logging)
     if media:
         if isinstance(media, str) and media:
             return media
@@ -1436,13 +1446,8 @@ def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths:
                     for m in v:
                         if isinstance(m, str) and m:
                             return m
-    if isinstance(media_local_path, str) and media_local_path:
-        return media_local_path
-    if isinstance(media_local_paths, (list, tuple)):
-        for p in media_local_paths:
-            if isinstance(p, str) and p:
-                return p
     return None
+
 
 def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> str:
     if not frames_b64:
@@ -1644,7 +1649,6 @@ async def fetch_social_post_summary_async(
     urls_instagram_profiles = [u for u in input_urls if "instagram.com" in u and _is_ig_profile_url(u)]
     urls_instagram_posts    = [u for u in input_urls if "instagram.com" in u and _shortcode(u)]
     
-    # TikTok: separar posts e perfis
     urls_tiktok_profiles    = [u for u in input_urls if "tiktok.com" in u and _is_tt_profile_url(u)]
     urls_tiktok_posts       = [u for u in input_urls if "tiktok.com" in u and _tt_id(u)]
     
@@ -1691,7 +1695,7 @@ async def fetch_social_post_summary_async(
 
     # remove placeholders vazios de perfis
     profile_set = set(_normalize_ig_profile_url(u) for u in urls_instagram_profiles) | \
-              set(_normalize_tt_profile_url(u) for u in urls_tiktok_profiles)
+                  set(_normalize_tt_profile_url(u) for u in urls_tiktok_profiles)
 
     def _is_placeholder_for_profile(row: dict) -> bool:
         u = row.get("url") or ""
@@ -1710,20 +1714,28 @@ async def fetch_social_post_summary_async(
 
     results = [r for r in results if not _is_placeholder_for_profile(r)]
 
-    # garante inclusão de posts que não foram mapeados
+    # ✅ garante inclusão de posts que não foram mapeados — mas IGNORA perfis
     seen_urls = set(r.get("url") for r in results if r.get("url"))
     for it in fetched_new_items:
         u = it.get("url")
-        if u and u not in seen_urls:
-            row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
-            row["url"] = u
-            row["_from_mongo"] = False
-            row.setdefault("hashtags", [])
-            row.setdefault("mentions", [])
-            results.append(row)
-            seen_urls.add(u)
+        if not u or u in seen_urls:
+            continue
+        # pula URLs de perfil para não criar "registro do perfil"
+        try:
+            if ("tiktok.com" in u and _is_tt_profile_url(u)) or ("instagram.com" in u and _is_ig_profile_url(u)):
+                continue
+        except Exception:
+            pass
 
-    # ⚠️ Deduplicação final (url + ownerUsername + timestamp)
+        row = {k: it.get(k) if k in it else None for k in OUTPUT_FIELDS}
+        row["url"] = u
+        row["_from_mongo"] = False
+        row.setdefault("hashtags", [])
+        row.setdefault("mentions", [])
+        results.append(row)
+        seen_urls.add(u)
+
+    # Deduplicação final (url + ownerUsername + timestamp)
     unique: Dict[Tuple[str, Optional[str], Optional[str]], dict] = {}
     for r in results:
         key = (
@@ -1766,6 +1778,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
