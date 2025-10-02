@@ -406,18 +406,32 @@ def _audio_temp_speed_from_video_ffmpeg(
 
 def transcrever_video_em_speed(
     video_path: str, speed: float = 2.0, sample_rate: int = 16000,
-) -> str:
+) -> Tuple[str, Optional[float]]:
     tmpdir, wav_path, tmpdir_ctx = _audio_temp_speed_from_video_ffmpeg(
         video_path, speed=speed, sample_rate=sample_rate
     )
     try:
+        dur_s = _ffprobe_duration_seconds(wav_path)
         resp = AudioModel().transcribe(wav_path)
-        return resp.get("text", "") if isinstance(resp, dict) else (resp or "")
+        texto = resp.get("text", "") if isinstance(resp, dict) else (resp or "")
+        return texto, dur_s
     finally:
         try:
             tmpdir_ctx.cleanup()
         except Exception:
             pass
+
+def _ffprobe_duration_seconds(path: str) -> Optional[float]:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+        )
+        out = proc.stdout.decode("utf-8", errors="ignore").strip()
+        return float(out) if out else None
+    except Exception:
+        return None
 
 # ─────────────────────────────────────────────────────────────
 # Apify / Scrapers
@@ -1449,9 +1463,12 @@ def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths:
     return None
 
 
-def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> str:
+def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> Tuple[str, Optional[int], Optional[int]]:
+    """
+    Retorna: (descricao_texto, input_tokens, output_tokens).
+    """
     if not frames_b64:
-        return ""
+        return "", None, None
     try:
         imagens = frames_b64[:max_imgs]
         mensagens = [
@@ -1469,9 +1486,14 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
         s = get_settings()
         _, client, _ = get_clients()
         resp = client.chat.completions.create(model=s.OPENAI_CHAT_MODEL, messages=mensagens)
-        return (resp.choices[0].message.content or "").strip()
+        texto = (resp.choices[0].message.content or "").strip()
+        # Extrai contagem de tokens, se disponível
+        usage = getattr(resp, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        output_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        return texto, input_tokens, output_tokens
     except Exception as e:
-        return f"[ERRO descrição frames] {e}"
+        return f"[ERRO descrição frames] {e}", None, None
 
 # ─────────────────────────────────────────────────────────────
 # Transcrição em paralelo (threads) + descrição de frames
@@ -1479,10 +1501,11 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
 def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore):
     """
     Transcreve vídeo/imag. usando arquivo local (em ./media) e retorna:
-      (idx, transcricao:str|None, base64Frames:list[str], framesDescricao:str|None, erro:str|None)
+      (idx, transcricao:str|None, base64Frames:list[str], framesDescricao:str|None,
+       input_tokens:int|None, output_tokens:int|None, audio_seconds:float|None, erro:str|None)
     """
     if not media_url:
-        return idx, None, [], None, "sem_media_url"
+        return idx, None, [], None, None, None, None, "sem_media_url"
 
     try:
         base_dir = Path(media)
@@ -1501,7 +1524,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
         local_path = _resolve_local_path(media_url)
         if not local_path.exists():
-            return idx, None, [], None, f"FileNotFoundError: {local_path}"
+            return idx, None, [], None, None, None, None, f"FileNotFoundError: {local_path}"
 
         ext = local_path.suffix.lower()
         is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
@@ -1510,6 +1533,9 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         texto: Optional[str] = None
         base64_frames: List[str] = []
         frames_descricao: Optional[str] = None
+        input_tokens: Optional[int] = None
+        output_tokens: Optional[int] = None
+        audio_seconds: Optional[float] = None
 
         if is_video:
             tlog(f"[TR] 🎙️ idx={idx}: transcrição {local_path.name}")
@@ -1517,7 +1543,9 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             with sem:
                 try:
                     _t0 = time.time()
-                    texto = transcrever_video_em_speed(str(local_path))
+                    texto_resp, dur_s = transcrever_video_em_speed(str(local_path))
+                    texto = texto_resp
+                    audio_seconds = dur_s
                     tlog(f"[TR] ✅ idx={idx}: {local_path.name} em {time.time()-_t0:.1f}s")
                 except Exception as e:
                     tlog(f"[TR] ❌ idx={idx}: {local_path.name}: {e}")
@@ -1528,29 +1556,40 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             except Exception as fe:
                 tlog(f"[frames] erro extraindo frames de {local_path}: {fe}")
                 base64_frames = []
-            # 3) descrição dos frames
+            # 3) descrição dos frames (coleta tokens)
             if base64_frames:
-                frames_descricao = _descrever_frames(base64_frames)
+                frames_descricao, input_tokens, output_tokens = _descrever_frames(base64_frames)
 
         elif is_image:
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-            frames_descricao = _descrever_frames(base64_frames)
+            frames_descricao, input_tokens, output_tokens = _descrever_frames(base64_frames)
 
-        return idx, texto, base64_frames, frames_descricao, None
+        return idx, texto, base64_frames, frames_descricao, input_tokens, output_tokens, audio_seconds, None
 
     except Exception as e:
-        return idx, None, [], None, f"{type(e).__name__}: {e}"
+        return idx, None, [], None, None, None, None, f"{type(e).__name__}: {e}"
 
 def anexar_transcricoes_threaded(
-    resultados: List[Dict[str, Any]],
+   Resultados: List[Dict[str, Any]],
     max_workers: int = 4,
     gpu_singleton: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Para cada item com mídia local, transcreve (vídeo) e descreve frames em paralelo.
     Mantém campos existentes vindos do Mongo; só preenche se houver conteúdo novo.
+
+    Campos adicionados/atualizados por item:
+      - transcricao
+      - base64Frames
+      - framesDescricao
+      - input_tokens
+      - output_tokens
+      - audio_seconds
+      - ai_model = "gpt-5-nano"
+      - transcricao_erro (quando houver)
     """
+    resultados = Resultados  # manter nome original da base
     if not resultados:
         return resultados
 
@@ -1563,6 +1602,11 @@ def anexar_transcricoes_threaded(
         # Se já tem transcrição/frames do Mongo, não reprocessa
         if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
             item.setdefault("base64Frames", [])
+            # padronização dos novos campos
+            item.setdefault("ai_model", "gpt-5-nano")
+            item.setdefault("input_tokens", None)
+            item.setdefault("output_tokens", None)
+            item.setdefault("audio_seconds", None)
             continue
 
         url_media = _pick_media_url(
@@ -1579,14 +1623,34 @@ def anexar_transcricoes_threaded(
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
                 item["framesDescricao"] = None
+            # padronização dos novos campos
+            item.setdefault("ai_model", "gpt-5-nano")
+            item.setdefault("input_tokens", None)
+            item.setdefault("output_tokens", None)
+            item.setdefault("audio_seconds", None)
 
     if not jobs:
+        # Garante padronização para todos
+        for item in resultados:
+            item.setdefault("ai_model", "gpt-5-nano")
+            item.setdefault("input_tokens", None)
+            item.setdefault("output_tokens", None)
+            item.setdefault("audio_seconds", None)
         return resultados
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_thread_worker, idx, url, sem) for idx, url in jobs]
         for fut in as_completed(futs):
-            idx, transcricao, frames, frames_desc, erro = fut.result()
+            (
+                idx,
+                transcricao,
+                frames,
+                frames_desc,
+                input_tokens,
+                output_tokens,
+                audio_seconds,
+                erro,
+            ) = fut.result()
 
             if transcricao is not None:
                 resultados[idx]["transcricao"] = transcricao
@@ -1595,10 +1659,23 @@ def anexar_transcricoes_threaded(
             if frames_desc is not None:
                 resultados[idx]["framesDescricao"] = frames_desc
 
+            # ✅ novos campos: tokens, modelo e duração do áudio
+            resultados[idx]["input_tokens"] = input_tokens
+            resultados[idx]["output_tokens"] = output_tokens
+            resultados[idx]["audio_seconds"] = audio_seconds
+            resultados[idx]["ai_model"] = "gpt-5-nano"
+
             if erro:
                 resultados[idx]["transcricao_erro"] = erro
             else:
                 resultados[idx].pop("transcricao_erro", None)
+
+    # padroniza para todos os itens (inclusive vindos do Mongo ou sem mídia)
+    for item in resultados:
+        item.setdefault("ai_model", "gpt-5-nano")
+        item.setdefault("input_tokens", None)
+        item.setdefault("output_tokens", None)
+        item.setdefault("audio_seconds", None)
 
     return resultados
 
@@ -1778,6 +1855,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
 
