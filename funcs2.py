@@ -438,6 +438,33 @@ def _ffprobe_duration_seconds(path: str) -> Optional[float]:
     except Exception:
         return None
 
+# Heurística: tokens "equivalentes" por tile 512x512
+TOKENS_PER_TILE = 85
+
+def _estimate_image_tokens_from_b64_list(frames_b64: List[str], tokens_per_tile: int = TOKENS_PER_TILE) -> Tuple[int, int]:
+    """
+    Retorna (num_images, estimated_image_tokens) calculando tiles de 512x512 para cada imagem.
+    Se falhar ao decodificar alguma imagem, assume 1 tile para ela.
+    """
+    total_tiles = 0
+    num_images = 0
+    for b64 in frames_b64:
+        try:
+            data = base64.b64decode(b64)
+            nparr = np.frombuffer(data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                tiles = 1
+            else:
+                h, w = img.shape[:2]
+                tiles = ceil(w / 512) * ceil(h / 512)
+            total_tiles += tiles
+            num_images += 1
+        except Exception:
+            total_tiles += 1
+            num_images += 1
+    return num_images, total_tiles * tokens_per_tile
+
 # ─────────────────────────────────────────────────────────────
 # Apify / Scrapers
 # ─────────────────────────────────────────────────────────────
@@ -1471,15 +1498,17 @@ def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths:
 def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> Tuple[str, Optional[int], Optional[int], int, int]:
     """
     Retorna: (descricao_texto, input_tokens_text, output_tokens_text, num_images, estimated_image_tokens).
-    - input_tokens_text / output_tokens_text vêm da API (texto apenas).
-    - num_images = quantas imagens foram enviadas no prompt.
-    - estimated_image_tokens = tokens equivalentes cobrados pelas imagens (heurística).
+    - input/output_tokens_text: apenas TEXTO (usage da API).
+    - num_images / estimated_image_tokens: estimativa baseada em tiles 512x512 por imagem.
     """
     if not frames_b64:
         return "", None, None, 0, 0
-
     try:
         imagens = frames_b64[:max_imgs]
+
+        # calcula num_images e tokens estimados pelas imagens (por resolução)
+        num_images, estimated_image_tokens = _estimate_image_tokens_from_b64_list(imagens)
+
         mensagens = [
             {
                 "role": "user",
@@ -1492,23 +1521,16 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
                 ),
             }
         ]
-
         s = get_settings()
         _, client, _ = get_clients()
         resp = client.chat.completions.create(model=s.OPENAI_CHAT_MODEL, messages=mensagens)
 
         texto = (resp.choices[0].message.content or "").strip()
 
-        # contagem de tokens de texto
+        # tokens de TEXTO (prompt/completion) — imagens não entram no usage
         usage = getattr(resp, "usage", None)
         input_tokens = getattr(usage, "prompt_tokens", None) if usage else None
         output_tokens = getattr(usage, "completion_tokens", None) if usage else None
-
-        # cálculo de imagens
-        num_images = len(imagens)
-        # estimativa: cada imagem conta como 85 tokens (512x512 tile base). 
-        # Ajuste conforme política/pricing oficial da OpenAI se necessário.
-        estimated_image_tokens = num_images * 85
 
         return texto, input_tokens, output_tokens, num_images, estimated_image_tokens
 
@@ -1596,9 +1618,12 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
                 tlog(f"[frames] erro extraindo frames de {local_path}: {fe}")
                 base64_frames = []
 
-            # 3) descrição dos frames (coleta tokens de texto e métricas de imagem)
+            # 3) descrição dos frames (tokens de texto + métricas de imagens)
             if base64_frames:
-                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames)
+                # ~1 frame/6s, limitado entre 3 e 15 imagens
+                secs = ai_model_data.get("audio_seconds") or 0
+                dyn_max_imgs = max(3, min(15, int(round(secs / 6)) or 1))
+                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames, max_imgs=dyn_max_imgs)
                 frames_descricao = desc
                 ai_model_data["input_tokens"] = in_tok
                 ai_model_data["output_tokens"] = out_tok
@@ -1608,8 +1633,8 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         elif is_image:
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-            # descrição + métricas para imagem única
-            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames)
+            # max_imgs=1 para imagens
+            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames, max_imgs=1)
             frames_descricao = desc
             ai_model_data["input_tokens"] = in_tok
             ai_model_data["output_tokens"] = out_tok
@@ -1910,4 +1935,5 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
