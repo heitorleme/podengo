@@ -86,30 +86,26 @@ def _sanitize_items(resultados):
         # 2) versão persistida no Mongo (inclui ai_model_data, audio_snapshot etc.)
         if "transcricao_erro" not in r:
             item_para_upload = {
-                # básicos
-                "url": r.get("url"),
-                "ownerUsername": r.get("ownerUsername"),
-                "caption": r.get("caption"),
-                "type": r.get("type"),
-                # métricas
-                "likesCount": r.get("likesCount"),
-                "commentsCount": r.get("commentsCount"),
-                "videoPlayCount": r.get("videoPlayCount"),
-                "videoViewCount": r.get("videoViewCount"),
-                # texto gerado
-                "transcricao": r.get("transcricao"),
-                "framesDescricao": r.get("framesDescricao"),
-                # dados de áudio
-                "audio_id": r.get("audio_id"),
-                "audio_snapshot": r.get("audio_snapshot"),
-                # tags
-                "hashtags": r.get("hashtags"),
-                "mentions": r.get("mentions"),
-                # bloco agregado com tokens/modelo/duração
-                "ai_model_data": r.get("ai_model_data"),
+                k: r.get(k)
+                for k in [
+                    "url",
+                    "ownerUsername",
+                    "caption",
+                    "type",
+                    "likesCount",
+                    "commentsCount",
+                    "videoPlayCount",
+                    "videoViewCount",
+                    "transcricao",
+                    "framesDescricao",
+                    "audio_id",
+                    "audio_snapshot",
+                    "hashtags",
+                    "mentions",
+                    "ai_model_data",
+                ]
             }
-            # timestamp correto do post (usa post_timestamp, com fallback)
-            item_para_upload["post_timestamp"] = r.get("post_timestamp") or r.get("timestamp")
+            item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
             item_para_upload["upload_timestamp"] = datetime.now()
             itens_para_upload.append(item_para_upload)
 
@@ -186,6 +182,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # Mantém compatibilidade com execução direta (opcional)
 if __name__ == "__main__":
     print("Este módulo agora espera ser chamado via main(urls_or_text).")
+
 
 
 
