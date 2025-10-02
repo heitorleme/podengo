@@ -1468,12 +1468,16 @@ def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths:
     return None
 
 
-def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> Tuple[str, Optional[int], Optional[int]]:
+def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "pt-BR") -> Tuple[str, Optional[int], Optional[int], int, int]:
     """
-    Retorna: (descricao_texto, input_tokens, output_tokens).
+    Retorna: (descricao_texto, input_tokens_text, output_tokens_text, num_images, estimated_image_tokens).
+    - input_tokens_text / output_tokens_text vêm da API (texto apenas).
+    - num_images = quantas imagens foram enviadas no prompt.
+    - estimated_image_tokens = tokens equivalentes cobrados pelas imagens (heurística).
     """
     if not frames_b64:
-        return "", None, None
+        return "", None, None, 0, 0
+
     try:
         imagens = frames_b64[:max_imgs]
         mensagens = [
@@ -1488,17 +1492,28 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
                 ),
             }
         ]
+
         s = get_settings()
         _, client, _ = get_clients()
         resp = client.chat.completions.create(model=s.OPENAI_CHAT_MODEL, messages=mensagens)
+
         texto = (resp.choices[0].message.content or "").strip()
-        # Extrai contagem de tokens, se disponível
+
+        # contagem de tokens de texto
         usage = getattr(resp, "usage", None)
         input_tokens = getattr(usage, "prompt_tokens", None) if usage else None
         output_tokens = getattr(usage, "completion_tokens", None) if usage else None
-        return texto, input_tokens, output_tokens
+
+        # cálculo de imagens
+        num_images = len(imagens)
+        # estimativa: cada imagem conta como 85 tokens (512x512 tile base). 
+        # Ajuste conforme política/pricing oficial da OpenAI se necessário.
+        estimated_image_tokens = num_images * 85
+
+        return texto, input_tokens, output_tokens, num_images, estimated_image_tokens
+
     except Exception as e:
-        return f"[ERRO descrição frames] {e}", None, None
+        return f"[ERRO descrição frames] {e}", None, None, 0, 0
 
 # ─────────────────────────────────────────────────────────────
 # Transcrição em paralelo (threads) + descrição de frames
@@ -1512,9 +1527,11 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
     ai_model_data SEMPRE vem preenchido com as chaves:
       {
         "ai_model": "gpt-5-nano",
-        "input_tokens": int|None,
-        "output_tokens": int|None,
-        "audio_seconds": float|None
+        "input_tokens": int|None,              # texto do prompt
+        "output_tokens": int|None,             # texto da resposta
+        "audio_seconds": float|None,           # duração do WAV enviado ao Whisper
+        "num_images": int,                     # imagens enviadas no prompt
+        "estimated_image_tokens": int          # estimativa de tokens equivalentes das imagens
       }
     """
     # dicionário padrão (sempre presente)
@@ -1523,6 +1540,8 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         "input_tokens": None,
         "output_tokens": None,
         "audio_seconds": None,
+        "num_images": 0,
+        "estimated_image_tokens": 0,
     }
 
     if not media_url:
@@ -1577,20 +1596,25 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
                 tlog(f"[frames] erro extraindo frames de {local_path}: {fe}")
                 base64_frames = []
 
-            # 3) descrição dos frames (coleta tokens do chat)
+            # 3) descrição dos frames (coleta tokens de texto e métricas de imagem)
             if base64_frames:
-                desc, in_tok, out_tok = _descrever_frames(base64_frames)
+                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames)
                 frames_descricao = desc
                 ai_model_data["input_tokens"] = in_tok
                 ai_model_data["output_tokens"] = out_tok
+                ai_model_data["num_images"] = num_imgs
+                ai_model_data["estimated_image_tokens"] = est_img_tokens
 
         elif is_image:
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-            desc, in_tok, out_tok = _descrever_frames(base64_frames)
+            # descrição + métricas para imagem única
+            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames)
             frames_descricao = desc
             ai_model_data["input_tokens"] = in_tok
             ai_model_data["output_tokens"] = out_tok
+            ai_model_data["num_images"] = num_imgs
+            ai_model_data["estimated_image_tokens"] = est_img_tokens
             # audio_seconds permanece None para imagens
 
         return idx, texto, base64_frames, frames_descricao, ai_model_data, None
@@ -1629,7 +1653,10 @@ def anexar_transcricoes_threaded(
             "input_tokens": None,
             "output_tokens": None,
             "audio_seconds": None,
+            "num_images": 0,
+            "estimated_image_tokens": 0,
         })
+
 
         # Se já tem transcrição/frames do Mongo, não reprocessa
         if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
@@ -1702,6 +1729,8 @@ def anexar_transcricoes_threaded(
             item["ai_model_data"].setdefault("input_tokens", None)
             item["ai_model_data"].setdefault("output_tokens", None)
             item["ai_model_data"].setdefault("audio_seconds", None)
+            item["ai_model_data"].setdefault("num_images", 0)
+            item["ai_model_data"].setdefault("estimated_image_tokens", 0)
 
     return resultados
 
@@ -1881,3 +1910,4 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
