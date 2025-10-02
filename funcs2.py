@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, List, Tuple, Set, Dict
 from urllib.parse import urlparse, urlunparse, urlsplit, unquote
 from tempfile import TemporaryDirectory, mkdtemp
+import numpy as np
 
 import pydantic; print(pydantic.__version__)  # debug: mostra versão do pydantic
 import pandas as pd
@@ -1549,10 +1550,10 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
     ai_model_data SEMPRE vem preenchido com as chaves:
       {
         "ai_model": "gpt-5-nano",
-        "input_tokens": int|None,              # texto do prompt
-        "output_tokens": int|None,             # texto da resposta
-        "audio_seconds": float|None,           # duração do WAV enviado ao Whisper
-        "num_images": int,                     # imagens enviadas no prompt
+        "input_tokens": int|None,              # tokens de TEXTO do prompt (images não entram aqui)
+        "output_tokens": int|None,             # tokens de TEXTO da resposta
+        "audio_seconds": float|None,           # duração do áudio enviado ao Whisper (em segundos)
+        "num_images": int,                     # quantas imagens foram efetivamente enviadas
         "estimated_image_tokens": int          # estimativa de tokens equivalentes das imagens
       }
     """
@@ -1602,7 +1603,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             with sem:
                 try:
                     _t0 = time.time()
-                    # esta função deve retornar (texto, duracao_em_segundos)
+                    # retorna (texto, duracao_em_segundos)
                     texto_resp, dur_s = transcrever_video_em_speed(str(local_path))
                     texto = texto_resp
                     ai_model_data["audio_seconds"] = dur_s
@@ -1611,7 +1612,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
                     tlog(f"[TR] ❌ idx={idx}: {local_path.name}: {e}")
                     raise
 
-            # 2) frames
+            # 2) extração de frames
             try:
                 base64_frames = get_video_frames(str(local_path), every_nth=60)
             except Exception as fe:
@@ -1623,7 +1624,10 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
                 # ~1 frame/6s, limitado entre 3 e 15 imagens
                 secs = ai_model_data.get("audio_seconds") or 0
                 dyn_max_imgs = max(3, min(15, int(round(secs / 6)) or 1))
-                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames, max_imgs=dyn_max_imgs)
+                # _descrever_frames deve retornar: (desc, input_tok, output_tok, num_imgs, est_img_tokens)
+                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
+                    base64_frames, max_imgs=dyn_max_imgs
+                )
                 frames_descricao = desc
                 ai_model_data["input_tokens"] = in_tok
                 ai_model_data["output_tokens"] = out_tok
@@ -1633,8 +1637,10 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         elif is_image:
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-            # max_imgs=1 para imagens
-            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(base64_frames, max_imgs=1)
+            # max_imgs=1 para imagens estáticas
+            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
+                base64_frames, max_imgs=1
+            )
             frames_descricao = desc
             ai_model_data["input_tokens"] = in_tok
             ai_model_data["output_tokens"] = out_tok
@@ -1935,5 +1941,6 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
+
 
 
