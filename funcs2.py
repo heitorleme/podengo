@@ -169,7 +169,12 @@ def tlog(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "post_timestamp", "transcricao", "framesDescricao"]
 MEDIA_FIELDS  = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
-OTHER_FIELDS  = ["likesCount", "commentsCount", "videoPlayCount", "audio_id", "audio_snapshot", "hashtags", "mentions"]
+OTHER_FIELDS  = [
+    "likesCount", "commentsCount", "videoPlayCount", "videoViewCount",
+    "audio_id", "audio_snapshot", "hashtags", "mentions",
+    "ai_model_data"
+]
+
 MONGO_FETCH_FIELDS = MONGO_FIELDS + OTHER_FIELDS
 OUTPUT_FIELDS = MONGO_FIELDS + MEDIA_FIELDS + OTHER_FIELDS
 
@@ -1502,10 +1507,26 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
     """
     Transcreve vídeo/imag. usando arquivo local (em ./media) e retorna:
       (idx, transcricao:str|None, base64Frames:list[str], framesDescricao:str|None,
-       input_tokens:int|None, output_tokens:int|None, audio_seconds:float|None, erro:str|None)
+       ai_model_data:dict, erro:str|None)
+
+    ai_model_data SEMPRE vem preenchido com as chaves:
+      {
+        "ai_model": "gpt-5-nano",
+        "input_tokens": int|None,
+        "output_tokens": int|None,
+        "audio_seconds": float|None
+      }
     """
+    # dicionário padrão (sempre presente)
+    ai_model_data = {
+        "ai_model": "gpt-5-nano",
+        "input_tokens": None,
+        "output_tokens": None,
+        "audio_seconds": None,
+    }
+
     if not media_url:
-        return idx, None, [], None, None, None, None, "sem_media_url"
+        return idx, None, [], None, ai_model_data, "sem_media_url"
 
     try:
         base_dir = Path(media)
@@ -1524,7 +1545,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
         local_path = _resolve_local_path(media_url)
         if not local_path.exists():
-            return idx, None, [], None, None, None, None, f"FileNotFoundError: {local_path}"
+            return idx, None, [], None, ai_model_data, f"FileNotFoundError: {local_path}"
 
         ext = local_path.suffix.lower()
         is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
@@ -1533,9 +1554,6 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         texto: Optional[str] = None
         base64_frames: List[str] = []
         frames_descricao: Optional[str] = None
-        input_tokens: Optional[int] = None
-        output_tokens: Optional[int] = None
-        audio_seconds: Optional[float] = None
 
         if is_video:
             tlog(f"[TR] 🎙️ idx={idx}: transcrição {local_path.name}")
@@ -1543,35 +1561,45 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             with sem:
                 try:
                     _t0 = time.time()
+                    # esta função deve retornar (texto, duracao_em_segundos)
                     texto_resp, dur_s = transcrever_video_em_speed(str(local_path))
                     texto = texto_resp
-                    audio_seconds = dur_s
+                    ai_model_data["audio_seconds"] = dur_s
                     tlog(f"[TR] ✅ idx={idx}: {local_path.name} em {time.time()-_t0:.1f}s")
                 except Exception as e:
                     tlog(f"[TR] ❌ idx={idx}: {local_path.name}: {e}")
                     raise
+
             # 2) frames
             try:
                 base64_frames = get_video_frames(str(local_path), every_nth=60)
             except Exception as fe:
                 tlog(f"[frames] erro extraindo frames de {local_path}: {fe}")
                 base64_frames = []
-            # 3) descrição dos frames (coleta tokens)
+
+            # 3) descrição dos frames (coleta tokens do chat)
             if base64_frames:
-                frames_descricao, input_tokens, output_tokens = _descrever_frames(base64_frames)
+                desc, in_tok, out_tok = _descrever_frames(base64_frames)
+                frames_descricao = desc
+                ai_model_data["input_tokens"] = in_tok
+                ai_model_data["output_tokens"] = out_tok
 
         elif is_image:
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-            frames_descricao, input_tokens, output_tokens = _descrever_frames(base64_frames)
+            desc, in_tok, out_tok = _descrever_frames(base64_frames)
+            frames_descricao = desc
+            ai_model_data["input_tokens"] = in_tok
+            ai_model_data["output_tokens"] = out_tok
+            # audio_seconds permanece None para imagens
 
-        return idx, texto, base64_frames, frames_descricao, input_tokens, output_tokens, audio_seconds, None
+        return idx, texto, base64_frames, frames_descricao, ai_model_data, None
 
     except Exception as e:
-        return idx, None, [], None, None, None, None, f"{type(e).__name__}: {e}"
+        return idx, None, [], None, ai_model_data, f"{type(e).__name__}: {e}"
 
 def anexar_transcricoes_threaded(
-   Resultados: List[Dict[str, Any]],
+    resultados: List[Dict[str, Any]],
     max_workers: int = 4,
     gpu_singleton: bool = True,
 ) -> List[Dict[str, Any]]:
@@ -1583,13 +1611,9 @@ def anexar_transcricoes_threaded(
       - transcricao
       - base64Frames
       - framesDescricao
-      - input_tokens
-      - output_tokens
-      - audio_seconds
-      - ai_model = "gpt-5-nano"
+      - ai_model_data  (sempre presente com: ai_model, input_tokens, output_tokens, audio_seconds)
       - transcricao_erro (quando houver)
     """
-    resultados = Resultados  # manter nome original da base
     if not resultados:
         return resultados
 
@@ -1599,14 +1623,17 @@ def anexar_transcricoes_threaded(
     for idx, item in enumerate(resultados):
         veio_mongo = bool(item.get("_from_mongo"))
 
+        # Garante que SEMPRE exista ai_model_data (mesmo que não processe nada)
+        item.setdefault("ai_model_data", {
+            "ai_model": "gpt-5-nano",
+            "input_tokens": None,
+            "output_tokens": None,
+            "audio_seconds": None,
+        })
+
         # Se já tem transcrição/frames do Mongo, não reprocessa
         if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
             item.setdefault("base64Frames", [])
-            # padronização dos novos campos
-            item.setdefault("ai_model", "gpt-5-nano")
-            item.setdefault("input_tokens", None)
-            item.setdefault("output_tokens", None)
-            item.setdefault("audio_seconds", None)
             continue
 
         url_media = _pick_media_url(
@@ -1623,19 +1650,9 @@ def anexar_transcricoes_threaded(
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
                 item["framesDescricao"] = None
-            # padronização dos novos campos
-            item.setdefault("ai_model", "gpt-5-nano")
-            item.setdefault("input_tokens", None)
-            item.setdefault("output_tokens", None)
-            item.setdefault("audio_seconds", None)
 
     if not jobs:
-        # Garante padronização para todos
-        for item in resultados:
-            item.setdefault("ai_model", "gpt-5-nano")
-            item.setdefault("input_tokens", None)
-            item.setdefault("output_tokens", None)
-            item.setdefault("audio_seconds", None)
+        # nada para processar; já garantimos ai_model_data acima
         return resultados
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -1646,9 +1663,7 @@ def anexar_transcricoes_threaded(
                 transcricao,
                 frames,
                 frames_desc,
-                input_tokens,
-                output_tokens,
-                audio_seconds,
+                ai_model_data,
                 erro,
             ) = fut.result()
 
@@ -1659,23 +1674,34 @@ def anexar_transcricoes_threaded(
             if frames_desc is not None:
                 resultados[idx]["framesDescricao"] = frames_desc
 
-            # ✅ novos campos: tokens, modelo e duração do áudio
-            resultados[idx]["input_tokens"] = input_tokens
-            resultados[idx]["output_tokens"] = output_tokens
-            resultados[idx]["audio_seconds"] = audio_seconds
-            resultados[idx]["ai_model"] = "gpt-5-nano"
+            # ✅ único campo agregado para dados da IA
+            resultados[idx]["ai_model_data"] = ai_model_data or {
+                "ai_model": "gpt-5-nano",
+                "input_tokens": None,
+                "output_tokens": None,
+                "audio_seconds": None,
+            }
 
             if erro:
                 resultados[idx]["transcricao_erro"] = erro
             else:
                 resultados[idx].pop("transcricao_erro", None)
 
-    # padroniza para todos os itens (inclusive vindos do Mongo ou sem mídia)
+    # segurança: garante ai_model_data em todos (inclusive vindos do Mongo ou sem mídia)
     for item in resultados:
-        item.setdefault("ai_model", "gpt-5-nano")
-        item.setdefault("input_tokens", None)
-        item.setdefault("output_tokens", None)
-        item.setdefault("audio_seconds", None)
+        if "ai_model_data" not in item or not isinstance(item["ai_model_data"], dict):
+            item["ai_model_data"] = {
+                "ai_model": "gpt-5-nano",
+                "input_tokens": None,
+                "output_tokens": None,
+                "audio_seconds": None,
+            }
+        else:
+            # completa chaves eventualmente faltantes
+            item["ai_model_data"].setdefault("ai_model", "gpt-5-nano")
+            item["ai_model_data"].setdefault("input_tokens", None)
+            item["ai_model_data"].setdefault("output_tokens", None)
+            item["ai_model_data"].setdefault("audio_seconds", None)
 
     return resultados
 
@@ -1855,24 +1881,3 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     _deletar_pasta_se_vazia(Path(media))
 
     return resultados
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
