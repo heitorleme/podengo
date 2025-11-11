@@ -1870,6 +1870,55 @@ def anexar_transcricoes_threaded(
 
     return resultados
 
+def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-large") -> List[dict]:
+    """
+    Gera embeddings para cada item combinando caption + transcricao + framesDescricao.
+    Retorna embeddings no formato JSON:
+      {"embedding": {"vectorized_embedding": [...], "embedding_provider": "openai", "embedding_model": model}}
+    """
+
+    _, client, _ = get_clients()
+
+    def limpar_texto(txt: str) -> str:
+        """Remove pontuação e múltiplos espaços."""
+        txt = re.sub(r"[^A-Za-zÀ-ÿ0-9\s]", " ", str(txt))
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt
+
+    tqdm_desc = "Gerando embeddings"
+    for item in tqdm(resultados, desc=tqdm_desc):
+        caption = item.get("caption") or ""
+        transcricao = item.get("transcricao") or ""
+        frames = item.get("framesDescricao") or ""
+
+        # Consolida texto com prefixos
+        texto = f"caption: {caption} transcricao: {transcricao} frames: {frames}"
+        texto = limpar_texto(texto)
+
+        if not texto:
+            item["embedding"] = None
+            continue
+
+        try:
+            resp = client.embeddings.create(model=model, input=texto)
+            vector = resp.data[0].embedding
+
+            item["embedding"] = {
+                "vectorized_embedding": vector,
+                "embedding_provider": "openai",
+                "embedding_model": model,
+            }
+
+        except Exception as e:
+            item["embedding"] = {
+                "vectorized_embedding": None,
+                "embedding_provider": "openai",
+                "embedding_model": model,
+                "error": str(e),
+            }
+
+    return resultados
+
 def _coletar_caminhos_midia(resultados: List[dict]) -> Set[Path]:
     paths: Set[Path] = set()
     def _add(p):
@@ -2045,6 +2094,9 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
 
     anexar_transcricoes_threaded(resultados, max_workers=4, gpu_singleton=True)
 
+    # Gerar embeddings para os resultados
+    resultados = gerar_embeddings(resultados)
+
     caminhos = _coletar_caminhos_midia(resultados)
     _deletar_arquivos(caminhos)
     _deletar_pasta_se_vazia(Path(media))
@@ -2060,6 +2112,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
