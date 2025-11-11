@@ -16,7 +16,7 @@ import tempfile
 import warnings
 from math import ceil
 from pathlib import Path
-from typing import Any, Iterable, Optional, List, Tuple, Set, Dict
+from typing import Any, Iterable, Optional, List, Tuple, Set, Dict, Callable
 from urllib.parse import urlparse, urlunparse, urlsplit, unquote
 from tempfile import TemporaryDirectory, mkdtemp
 import numpy as np
@@ -2404,3 +2404,4 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
 
     update_step("✅ Finalizado com sucesso!")
     return resultados
+
