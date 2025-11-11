@@ -2027,33 +2027,41 @@ def _inferir_categoria_knn(vizinhos):
     comunidades = [v.get("comunidade") for v in vizinhos if v.get("comunidade")]
     categorias = [v.get("categoria_principal") for v in vizinhos if v.get("categoria_principal")]
     subcategorias = [v.get("subcategoria") for v in vizinhos if v.get("subcategoria")]
-    scores = np.array([v.get("score", 0) for v in vizinhos])
+    scores = np.array([v.get("score", 0) for v in vizinhos], dtype=float)
 
     def ponderar(valores, distancias, epsilon: float = 1e-9):
         """
         Calcula pesos normalizados proporcionalmente à proximidade (1 / distância).
-        - Se todas as distâncias forem iguais → pesos iguais.
-        - Quanto menor a distância, maior o peso.
-        - Evita divisões por zero com epsilon.
+        Evita divisões por zero e problemas de tipo com arrays.
         """
-        if not valores or not distancias or len(valores) != len(distancias):
+        if (
+            valores is None
+            or len(valores) == 0
+            or distancias is None
+            or len(distancias) == 0
+            or len(valores) != len(distancias)
+        ):
             return None, {}
-    
+
         dist = np.array(distancias, dtype=float)
-        # converte distâncias em pesos inversos (menor distância = maior peso)
-        inv_dist = 1 / (dist + epsilon)
-    
+
+        # substitui distâncias inválidas (0, NaN, inf)
+        dist[~np.isfinite(dist)] = 1.0
+
+        # evita divisão por zero
+        inv_dist = 1.0 / (dist + epsilon)
+
         # normaliza pesos para somarem 1
         pesos_norm = inv_dist / inv_dist.sum()
-    
+
         pesos_dict = {}
         for val, peso in zip(valores, pesos_norm):
             if val:
                 pesos_dict[val] = pesos_dict.get(val, 0.0) + float(peso)
-    
+
         if not pesos_dict:
             return None, {}
-    
+
         proporcoes = {k: round(v * 100, 1) for k, v in pesos_dict.items()}
         valor_predito = max(proporcoes, key=proporcoes.get)
         return valor_predito, proporcoes
@@ -2066,7 +2074,7 @@ def _inferir_categoria_knn(vizinhos):
         "comunidade_predita": comunidade_predita,
         "categoria_principal": categoria_predita,
         "subcategoria": subcategoria_predita,
-        "comunidades_proporcoes": comunidades_prop
+        "comunidades_proporcoes": comunidades_prop,
     }
 
 def _hash_embedding(embedding):
@@ -2342,7 +2350,3 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
-
-
-
-
