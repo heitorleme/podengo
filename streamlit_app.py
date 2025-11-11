@@ -1,4 +1,5 @@
 import io
+import time
 from contextlib import redirect_stdout, redirect_stderr
 from importlib import import_module
 from urllib.parse import urlparse
@@ -96,19 +97,33 @@ if raw:
 st.divider()
 
 # ----------------------------
-# Execução do pipeline
+# Execução do pipeline com barra de progresso
 # ----------------------------
 if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", disabled=not urls):
     out_buf, err_buf = io.StringIO(), io.StringIO()
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+
+    def update_progress(ratio, message):
+        """Callback chamado pelo main/rodar_pipeline."""
+        percent = int(ratio * 100)
+        progress_bar.progress(percent)
+        progress_text.text(message)
+
     try:
         mod = import_module("main")
         if not hasattr(mod, "main"):
             st.error("`main.py` não contém uma função `main`.")
         else:
             fn = getattr(mod, "main")
-            with st.spinner("Executando..."):
-                with redirect_stdout(out_buf), redirect_stderr(err_buf):
-                    result = fn(urls)
+
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                with st.spinner("Executando pipeline..."):
+                    result = fn(urls, progress_callback=update_progress)
+
+            # garante barra completa no final
+            progress_bar.progress(100)
+            progress_text.text("✅ Execução concluída!")
 
             stdout_txt = out_buf.getvalue().strip()
             stderr_txt = err_buf.getvalue().strip()
@@ -189,3 +204,8 @@ if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", d
         if stderr_txt:
             with st.expander("⚠️ Erros/alertas (stderr)"):
                 st.code(stderr_txt)
+
+    # limpeza da barra e texto após conclusão
+    time.sleep(0.5)
+    progress_bar.empty()
+    progress_text.empty()
