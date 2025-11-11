@@ -1895,7 +1895,7 @@ def anexar_transcricoes_threaded(
 
     return resultados
 
-def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-large", batch_size: int = 100) -> List[dict]:
+def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[dict]:
     """
     Gera embeddings em BATCHES para cada item combinando caption + transcricao + framesDescricao.
     Retorna embeddings no formato:
@@ -2297,6 +2297,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
