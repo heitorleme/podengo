@@ -113,35 +113,42 @@ if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", d
             stdout_txt = out_buf.getvalue().strip()
             stderr_txt = err_buf.getvalue().strip()
 
-            # ----------------------------
-            # Saída estruturada em JSON
-            # ----------------------------
-            st.subheader("📦 Resultados estruturados")
-
-            structured_data = []
-            if result and isinstance(result, dict):
-                # se a função main já retorna resultados por URL
-                for i, u in enumerate(urls):
-                    structured_data.append({
-                        "url": u,
-                        "resultado": result.get("outputs", {}).get(u, "sem saída"),
-                        "embedding": result.get("embeddings", {}).get(u, []),
-                    })
-            else:
-                # fallback: tenta parsear stdout como JSON
-                import json
-                try:
-                    parsed = json.loads(stdout_txt)
-                    if isinstance(parsed, list):
-                        structured_data = parsed
-                    elif isinstance(parsed, dict):
-                        structured_data = [parsed]
-                except Exception:
-                    # fallback final: apenas encapsula o texto
-                    structured_data = [{"raw_output": stdout_txt}]
-
-            with st.expander("📄 Visualizar estrutura JSON", expanded=False):
-                st.json(structured_data)
+                # ----------------------------
+    # Saída estruturada em JSON
+    # ----------------------------
+    st.subheader("📦 Resultados estruturados")
+    
+    structured_data = []
+    if result and isinstance(result, dict):
+        # ✅ Se o main retornou um DataFrame, usa ele para mostrar os resultados
+        if "df" in result and hasattr(result["df"], "to_dict"):
+            try:
+                structured_data = result["df"].to_dict(orient="records")
+            except Exception as e:
+                st.warning(f"Não foi possível converter o DataFrame: {e}")
+                structured_data = []
+        else:
+            # tenta pegar possíveis saídas por URL
+            for u in urls:
+                structured_data.append({
+                    "url": u,
+                    "resultado": result.get("outputs", {}).get(u, "sem saída"),
+                    "embedding": result.get("embeddings", {}).get(u, []),
+                })
+    else:
+        # fallback: tenta parsear stdout como JSON
+        import json
+        try:
+            parsed = json.loads(stdout_txt)
+            if isinstance(parsed, list):
+                structured_data = parsed
+            elif isinstance(parsed, dict):
+                structured_data = [parsed]
+        except Exception:
+            structured_data = [{"raw_output": stdout_txt or "(sem saída)"}]
+    
+    with st.expander("📄 Visualizar estrutura JSON", expanded=False):
+        st.json(structured_data)
 
             # ----------------------------
             # Erros / alertas
@@ -183,3 +190,4 @@ if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", d
         if stderr_txt:
             with st.expander("⚠️ Erros/alertas (stderr)"):
                 st.code(stderr_txt)
+
