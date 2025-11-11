@@ -2063,23 +2063,19 @@ def _hash_embedding(embedding):
     return hashlib.md5(np.array(embedding).tobytes()).hexdigest()
 
 @lru_cache(maxsize=5000)
-def _buscar_vizinhos_mongo_cached(hash_key, k=5):
-    # você precisa de uma função que possa usar o hash como chave de cache
-    # recupera o embedding a partir de um cache externo se necessário
-    # mas aqui apenas refaz a busca
-    # (chamada "normal" do Mongo)
-    raise RuntimeError("Esta função deve ser chamada via wrapper que passa o embedding real.")
+def _buscar_vizinhos_mongo_cached(hash_key: str, emb_tuple: tuple, k=5):
+    """Cacheado por hash da embedding e conteúdo (tuple imutável)."""
+    embedding = np.array(emb_tuple, dtype=float)
+    return _buscar_vizinhos_mongo(embedding.tolist(), k=k)
 
 def _buscar_vizinhos_mongo_wrapper(embedding, k=5):
-    """Wrapper para cachear busca por hash de embedding."""
+    """Wrapper que cria uma chave cacheável a partir do vetor."""
+    if embedding is None:
+        return []
+    # converte o vetor em tupla para ser hashable
+    emb_tuple = tuple(float(x) for x in embedding)
     hash_key = _hash_embedding(embedding)
-    # hack simples: reatribui dinamicamente o comportamento
-    def cached_func(hash_key_inner):
-        return _buscar_vizinhos_mongo(embedding, k=k)
-    # executa manualmente, contornando a limitação de cache por argumento mutável
-    return _buscar_vizinhos_mongo_cached.__wrapped__(hash_key, k=k) \
-        if hash_key in _buscar_vizinhos_mongo_cached.cache_info() else \
-        _buscar_vizinhos_mongo(embedding, k=k)
+    return _buscar_vizinhos_mongo_cached(hash_key, emb_tuple, k)
 
 def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
     """
@@ -2297,6 +2293,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
