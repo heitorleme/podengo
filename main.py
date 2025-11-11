@@ -12,7 +12,6 @@ import numpy as np
 
 from funcs2 import rodar_pipeline, _upload_para_mongo, upload_muitos_para_mongo  # suas funções
 
-
 # ----------------------------
 # Configurações de domínios válidos
 # ----------------------------
@@ -129,18 +128,23 @@ def _sanitize_items(resultados):
                     "comunidades_proporcoes",
                 ]
             }
+
+            # 🔧 NOVO: remove o campo 'vectorized_embedding' dentro de 'embedding'
+            if isinstance(item_para_upload.get("embedding"), dict):
+                item_para_upload["embedding"].pop("vectorized_embedding", None)
+
             item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
             item_para_upload["upload_timestamp"] = datetime.now()
             itens_para_upload.append(item_para_upload)
 
+        # Impressão JSON (debug)
         try:
             print(json.dumps(item, ensure_ascii=False, indent=2))
         except Exception:
             print(str(item))
 
     return itens_sanitizados, itens_para_upload
-
-
+    
 # ----------------------------
 # Exportação para XLSX
 # ----------------------------
@@ -239,4 +243,5 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
