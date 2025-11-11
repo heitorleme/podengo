@@ -2332,7 +2332,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     4) Classifica via Mongo Vector Search
     5) Limpa mídia temporária
     """
-
+    tlog("[PIPELINE] Iniciando rodar_pipeline()")
     if not urls:
         print("Nenhuma URL fornecida.")
         return []
@@ -2373,7 +2373,9 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
                 f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})..."
             )
 
+    tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} vídeos")
     anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
+    tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
 
     # ----------------------------
     # 3️⃣ Gerar embeddings
@@ -2406,5 +2408,6 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
 
     update_step("✅ Finalizado com sucesso!")
     return resultados
+
 
 
