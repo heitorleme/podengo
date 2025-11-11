@@ -1919,6 +1919,99 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-larg
 
     return resultados
 
+# Nome do índice vetorial no Atlas
+VECTOR_INDEX_NAME = "comm_ref_vector_index"
+
+def _buscar_vizinhos_mongo(embedding_vector, k=5):
+    """Busca os k vizinhos mais próximos no MongoDB Atlas Vector Search."""
+    if not embedding_vector:
+        return []
+
+    db = _connect_to_mongo()
+    collection_ref = db["comunidades-ref"]
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": VECTOR_INDEX_NAME,
+                "path": "embedding",  # campo vetorial na coleção de referência
+                "queryVector": embedding_vector,
+                "numCandidates": 100,
+                "limit": k
+            }
+        },
+        {
+            "$project": {
+                "_id": 1,
+                "score": {"$meta": "vectorSearchScore"},
+                "comunidade": 1,
+                "categoria_principal": 1,
+                "subcategoria": 1
+            }
+        }
+    ]
+    try:
+        resultados = list(collection_ref.aggregate(pipeline))
+        return resultados
+    except Exception as e:
+        print(f"[CLUSTER] Erro ao buscar vizinhos no MongoDB: {e}")
+        return []
+
+def _inferir_categoria_knn(vizinhos):
+    """Determina comunidade/categoria/subcategoria predominantes ponderando pelos scores."""
+    if not vizinhos:
+        return None
+
+    comunidades = [v.get("comunidade") for v in vizinhos if v.get("comunidade")]
+    categorias = [v.get("categoria_principal") for v in vizinhos if v.get("categoria_principal")]
+    subcategorias = [v.get("subcategoria") for v in vizinhos if v.get("subcategoria")]
+    scores = np.array([v.get("score", 0) for v in vizinhos])
+
+    def ponderar(valores, pesos):
+        pesos_dict = {}
+        for val, peso in zip(valores, pesos):
+            if val:
+                pesos_dict[val] = pesos_dict.get(val, 0) + peso
+        total = sum(pesos_dict.values())
+        if total == 0:
+            return None, {}
+        proporcoes = {k: round((v / total) * 100, 1) for k, v in pesos_dict.items()}
+        valor_predito = max(proporcoes, key=proporcoes.get)
+        return valor_predito, proporcoes
+
+    comunidade_predita, comunidades_prop = ponderar(comunidades, scores)
+    categoria_predita, _ = ponderar(categorias, scores)
+    subcategoria_predita, _ = ponderar(subcategorias, scores)
+
+    return {
+        "comunidade_predita": comunidade_predita,
+        "categoria_principal": categoria_predita,
+        "subcategoria": subcategoria_predita,
+        "comunidades_proporcoes": comunidades_prop
+    }
+
+def classificar_via_mongo_vector_search(resultados: List[dict], k: int = 5) -> List[dict]:
+    """
+    Usa o MongoDB Atlas Vector Search para classificar embeddings gerados.
+    Adiciona campos:
+      - comunidade_predita
+      - categoria_principal
+      - subcategoria
+      - comunidades_proporcoes
+    """
+    for item in resultados:
+        emb = (item.get("embedding") or {}).get("vectorized_embedding")
+        if not emb:
+            continue
+
+        vizinhos = _buscar_vizinhos_mongo(emb, k=k)
+        resultado = _inferir_categoria_knn(vizinhos)
+
+        if resultado:
+            item.update(resultado)
+
+    return resultados
+
 def _coletar_caminhos_midia(resultados: List[dict]) -> Set[Path]:
     paths: Set[Path] = set()
     def _add(p):
@@ -2097,6 +2190,9 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
     # Gerar embeddings para os resultados
     resultados = gerar_embeddings(resultados)
 
+    # Classificação via MongoDB Atlas Vector Search (KNN)
+    resultados = classificar_via_mongo_vector_search(resultados, k=5)
+
     caminhos = _coletar_caminhos_midia(resultados)
     _deletar_arquivos(caminhos)
     _deletar_pasta_se_vazia(Path(media))
@@ -2112,6 +2208,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
