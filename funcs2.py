@@ -2056,26 +2056,25 @@ def _inferir_categoria_knn(vizinhos):
         "comunidades_proporcoes": comunidades_prop
     }
 
-
-# cache para resultados de vizinhos repetidos
 def _hash_embedding(embedding):
-    # cria uma chave única e compacta para o vetor
-    return hashlib.md5(np.array(embedding).tobytes()).hexdigest()
-
-@lru_cache(maxsize=5000)
-def _buscar_vizinhos_mongo_cached(hash_key: str, emb_tuple: tuple, k=5):
-    """Cacheado por hash da embedding e conteúdo (tuple imutável)."""
-    embedding = np.array(emb_tuple, dtype=float)
-    return _buscar_vizinhos_mongo(embedding.tolist(), k=k)
+    """Cria uma chave hash única para logging/debug (não usada em cache)."""
+    try:
+        return hashlib.md5(np.array(embedding, dtype=float).tobytes()).hexdigest()
+    except Exception:
+        return "invalid_hash"
 
 def _buscar_vizinhos_mongo_wrapper(embedding, k=5):
-    """Wrapper que cria uma chave cacheável a partir do vetor."""
+    """
+    Versão simplificada SEM cache.
+    Faz a busca direta no MongoDB usando o embedding real.
+    """
     if embedding is None:
         return []
-    # converte o vetor em tupla para ser hashable
-    emb_tuple = tuple(float(x) for x in embedding)
-    hash_key = _hash_embedding(embedding)
-    return _buscar_vizinhos_mongo_cached(hash_key, emb_tuple, k)
+    try:
+        return _buscar_vizinhos_mongo(embedding, k=k)
+    except Exception as e:
+        print(f"[CLUSTER] Erro em _buscar_vizinhos_mongo_wrapper: {e}")
+        return []
 
 def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
     """
@@ -2293,6 +2292,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
