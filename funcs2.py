@@ -2340,11 +2340,21 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     total_steps = 5
     step = 0
 
+    # --- função auxiliar para reportar progresso normalizado ---
+    def _safe_progress(percent: float, msg: str = ""):
+        """Garante que o valor do progresso fique entre 0 e 100 e captura erros do Streamlit."""
+        if not progress_callback:
+            return
+        try:
+            percent = max(0.0, min(1.0, percent))  # mantém entre 0 e 1
+            progress_callback(round(percent * 100, 2), msg)  # envia 0–100%
+        except Exception as e:
+            print(f"[Aviso] progress_callback falhou: {e}")
+
     def update_step(msg):
         nonlocal step
         step += 1
-        if progress_callback:
-            progress_callback(step / total_steps, msg)
+        _safe_progress(step / total_steps, msg)
 
     # ----------------------------
     # 1️⃣ Buscar/baixar posts
@@ -2366,12 +2376,9 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     def local_progress(concluidos=None, total=None):
         nonlocal progresso_local
         progresso_local += 1
-        if progress_callback:
-            progresso_total = (1 + (progresso_local / total_videos) * 2) / total_steps
-            progress_callback(
-                progresso_total,
-                f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})..."
-            )
+        # calcula progresso relativo (0–100) dentro desta etapa
+        progresso_total = (1 + (progresso_local / max(1, total_videos)) * 2) / total_steps
+        _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
 
     tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} vídeos")
     anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
@@ -2406,8 +2413,5 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
                 pass
         _deletar_pasta_se_vazia(tmpdir)
 
-    update_step("✅ Finalizado com sucesso!")
+    _safe_progress(1.0, "✅ Finalizado com sucesso!")
     return resultados
-
-
-
