@@ -1974,7 +1974,7 @@ def _buscar_vizinhos_mongo(embedding_vector, k=5):
     if embedding_vector is None:
         return []
 
-    # Garante que seja uma lista de floats
+    # Converte para lista se vier como np.ndarray
     if isinstance(embedding_vector, np.ndarray):
         embedding_vector = embedding_vector.tolist()
     elif not isinstance(embedding_vector, list):
@@ -1994,10 +1994,10 @@ def _buscar_vizinhos_mongo(embedding_vector, k=5):
         {
             "$vectorSearch": {
                 "index": VECTOR_INDEX_NAME,
-                "path": "embedding",
+                "path": "embedding",  # campo vetorial na coleção de referência
                 "queryVector": embedding_vector,
                 "numCandidates": 100,
-                "limit": k
+                "limit": k,
             }
         },
         {
@@ -2006,9 +2006,9 @@ def _buscar_vizinhos_mongo(embedding_vector, k=5):
                 "score": {"$meta": "vectorSearchScore"},
                 "comunidade": 1,
                 "categoria_principal": 1,
-                "subcategoria": 1
+                "subcategoria": 1,
             }
-        }
+        },
     ]
 
     try:
@@ -2078,18 +2078,31 @@ def _hash_embedding(embedding):
 
 def _buscar_vizinhos_mongo_wrapper(embedding, k=5):
     """
-    Versão simplificada SEM cache.
-    Faz a busca direta no MongoDB usando o embedding real.
+    Wrapper simples para validar e converter o embedding antes da busca.
+    (Sem cache, totalmente seguro para arrays numpy.)
     """
     if embedding is None:
         return []
+
+    if isinstance(embedding, np.ndarray):
+        embedding = embedding.tolist()
+    elif not isinstance(embedding, list):
+        try:
+            embedding = list(embedding)
+        except Exception:
+            print("[CLUSTER] Embedding inválido recebido no wrapper.")
+            return []
+
+    if len(embedding) == 0:
+        return []
+
     try:
         return _buscar_vizinhos_mongo(embedding, k=k)
     except Exception as e:
         print(f"[CLUSTER] Erro em _buscar_vizinhos_mongo_wrapper: {e}")
         return []
 
-def classificar_via_mongo_vector_search(resultados, k=5, max_workers=max_workers):
+def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
     """
     Classifica cada item via MongoDB Atlas Vector Search (sem cache),
     garantindo segurança de tipos e compatibilidade com numpy arrays.
@@ -2329,6 +2342,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
