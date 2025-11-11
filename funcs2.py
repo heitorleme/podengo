@@ -51,6 +51,9 @@ except Exception:
 
 warnings.filterwarnings("ignore")
 
+# Max workers
+max_workers=os.cpu_count() or 8
+
 # ─────────────────────────────────────────────────────────────
 # Config / Settings com fallback para st.secrets + os.environ
 # ─────────────────────────────────────────────────────────────
@@ -1760,7 +1763,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
 def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
-    max_workers: int = 4,
+    max_workers: int = max_workers,
     gpu_singleton: bool = False,
 ) -> List[Dict[str, Any]]:
     """
@@ -2185,7 +2188,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         print("Nenhum resultado retornado pelos scrapers.")
         return []
 
-    anexar_transcricoes_threaded(resultados, max_workers=4, gpu_singleton=True)
+    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=True)
 
     # Gerar embeddings para os resultados
     resultados = gerar_embeddings(resultados)
@@ -2208,6 +2211,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
