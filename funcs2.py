@@ -38,6 +38,8 @@ from loguru import logger
 from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+import hashlib
 import logging
 
 # OpenAI (cliente moderno)
@@ -2206,6 +2208,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
