@@ -2089,14 +2089,20 @@ def _buscar_vizinhos_mongo_wrapper(embedding, k=5):
         print(f"[CLUSTER] Erro em _buscar_vizinhos_mongo_wrapper: {e}")
         return []
 
-def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
+def classificar_via_mongo_vector_search(resultados, k=5, max_workers=max_workers):
     """
-    Versão paralelizada e cacheada da classificação.
+    Classifica cada item via MongoDB Atlas Vector Search (sem cache),
+    garantindo segurança de tipos e compatibilidade com numpy arrays.
     """
+
     def processar_item(item):
-        emb = (item.get("embedding") or {}).get("vectorized_embedding")
-    
-        # Normaliza o tipo do embedding
+        emb = None
+        try:
+            emb = (item.get("embedding") or {}).get("vectorized_embedding")
+        except Exception:
+            pass
+
+        # Converte para lista se necessário
         if emb is None:
             return item
         if isinstance(emb, np.ndarray):
@@ -2107,15 +2113,19 @@ def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
             except Exception:
                 print(f"[WARN] embedding inválido no item: {item.get('url')}")
                 return item
-    
+
         if len(emb) == 0:
             return item
 
-    vizinhos = _buscar_vizinhos_mongo_wrapper(emb, k=k)
-    resultado = _inferir_categoria_knn(vizinhos)
-    if resultado:
-        item.update(resultado)
-    return item
+        try:
+            vizinhos = _buscar_vizinhos_mongo_wrapper(emb, k=k)
+            resultado = _inferir_categoria_knn(vizinhos)
+            if resultado:
+                item.update(resultado)
+        except Exception as e:
+            print(f"[CLUSTER] Erro ao processar item {item.get('url')}: {e}")
+
+        return item
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futuros = [executor.submit(processar_item, item) for item in resultados]
@@ -2319,5 +2329,6 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
