@@ -205,6 +205,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 
     itens_sanitizados, itens_para_upload = _sanitize_items(resultados)
 
+    # ✅ Primeiro envia ao Mongo — preservando o vectorized_embedding
     try:
         if len(itens_para_upload) > 1:
             upload_muitos_para_mongo(itens_para_upload)
@@ -213,17 +214,19 @@ def main(urls_or_text: Union[str, Iterable[str]]):
     except Exception as e:
         print(f"[Aviso] Falha no upload para Mongo: {e}")
 
-    # Remove campos grandes e não necessários no Excel
+    # ✅ Agora cria uma cópia para exportar no Excel (sem vectorized_embedding)
+    itens_para_excel = []
     for r in itens_para_upload:
-        r.pop("audio_id", None)
-        r.pop("audio_snapshot", None)
+        copia = dict(r)  # cópia rasa
+        copia.pop("audio_id", None)
+        copia.pop("audio_snapshot", None)
+        if isinstance(copia.get("embedding"), dict):
+            copia["embedding"] = dict(copia["embedding"])  # cópia da embedding
+            copia["embedding"].pop("vectorized_embedding", None)
+        itens_para_excel.append(copia)
 
-            # 🔧 Remove o vetor de embedding (muito grande para Excel)
-        if isinstance(r.get("embedding"), dict):
-            r["embedding"].pop("vectorized_embedding", None)
-
-    # DataFrame baseado em itens_para_upload (mesmos dados enviados ao Mongo)
-    df = pd.DataFrame(itens_para_upload)
+    # DataFrame baseado na cópia (sem vectorized_embedding)
+    df = pd.DataFrame(itens_para_excel)
     if not df.empty:
         df = df.drop(columns=["_from_mongo"], errors="ignore")
 
@@ -243,6 +246,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
 
 
