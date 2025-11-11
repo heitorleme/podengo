@@ -166,6 +166,13 @@ if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", d
                 st.json(structured_data)
 
             # ----------------------------
+            # 🪵 Visualização dos TLOGs
+            # ----------------------------
+            if stdout_txt:
+                with st.expander("🪵 Logs de execução (tlogs)", expanded=False):
+                    st.code(stdout_txt, language="bash")
+
+            # ----------------------------
             # Erros / alertas
             # ----------------------------
             if stderr_txt:
