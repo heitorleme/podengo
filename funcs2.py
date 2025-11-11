@@ -1787,6 +1787,7 @@ def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
     max_workers: int = max_workers,
     gpu_singleton: bool = False,
+    callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Para cada item com mídia local, transcreve (vídeo) e descreve frames em paralelo.
@@ -1796,8 +1797,11 @@ def anexar_transcricoes_threaded(
       - transcricao
       - base64Frames
       - framesDescricao
-      - ai_model_data  (sempre presente com: ai_model, input_tokens, output_tokens, audio_seconds)
-      - transcricao_erro (quando houver)
+      - ai_model_data
+      - transcricao_erro
+
+    Parâmetro opcional:
+      - callback(i, total): chamado a cada item processado (para atualizar progresso).
     """
     if not resultados:
         return resultados
@@ -1817,7 +1821,6 @@ def anexar_transcricoes_threaded(
             "num_images": 0,
             "estimated_image_tokens": 0,
         })
-
 
         # Se já tem transcrição/frames do Mongo, não reprocessa
         if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
@@ -1842,6 +1845,9 @@ def anexar_transcricoes_threaded(
     if not jobs:
         # nada para processar; já garantimos ai_model_data acima
         return resultados
+
+    total = len(jobs)
+    concluídos = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_thread_worker, idx, url, sem) for idx, url in jobs]
@@ -1874,6 +1880,14 @@ def anexar_transcricoes_threaded(
                 resultados[idx]["transcricao_erro"] = erro
             else:
                 resultados[idx].pop("transcricao_erro", None)
+
+            # ✅ Atualiza progresso
+            concluídos += 1
+            if callback:
+                try:
+                    callback(concluídos, total)
+                except Exception:
+                    pass  # callback nunca deve travar o processamento
 
     # segurança: garante ai_model_data em todos (inclusive vindos do Mongo ou sem mídia)
     for item in resultados:
@@ -2311,15 +2325,15 @@ async def fetch_social_post_summary_async(
 
 async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     """
-    1) Busca/baixa os posts (TikTok/Instagram)
-    2) Transcreve + extrai frames
+    Executa o pipeline completo:
+    1) Busca posts
+    2) Transcreve e extrai frames
     3) Gera embeddings
-    4) Classifica via Vector Search
+    4) Classifica via Mongo Vector Search
     5) Limpa mídia temporária
     """
-    if urls is None or (isinstance(urls, (list, tuple, set)) and len(urls) == 0) \
-       or (isinstance(urls, pd.Series) and urls.empty) \
-       or (hasattr(urls, "empty") and urls.empty):
+
+    if not urls:
         print("Nenhuma URL fornecida.")
         return []
 
@@ -2345,7 +2359,19 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     # 2️⃣ Transcrever e extrair frames
     # ----------------------------
     update_step("🎙️ Transcrevendo e extraindo frames...")
-    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=True)
+
+    total_videos = len(resultados)
+    progresso_local = 0
+
+    def local_progress():
+        nonlocal progresso_local
+        progresso_local += 1
+        if progress_callback:
+            # Progresso da etapa 2 representando de 20% a 60% do total
+            progresso_total = (1 + (progresso_local / total_videos) * 2) / total_steps
+            progress_callback(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
+
+    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=True, callback=local_progress)
 
     # ----------------------------
     # 3️⃣ Gerar embeddings
@@ -2377,5 +2403,4 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     update_step("✅ Finalizado com sucesso!")
-
     return resultados
