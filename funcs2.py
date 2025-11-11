@@ -2095,15 +2095,27 @@ def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
     """
     def processar_item(item):
         emb = (item.get("embedding") or {}).get("vectorized_embedding")
+    
+        # Normaliza o tipo do embedding
+        if emb is None:
+            return item
         if isinstance(emb, np.ndarray):
             emb = emb.tolist()
-        if not emb:
+        elif not isinstance(emb, list):
+            try:
+                emb = list(emb)
+            except Exception:
+                print(f"[WARN] embedding inválido no item: {item.get('url')}")
+                return item
+    
+        if len(emb) == 0:
             return item
-        vizinhos = _buscar_vizinhos_mongo_wrapper(emb, k=k)
-        resultado = _inferir_categoria_knn(vizinhos)
-        if resultado:
-            item.update(resultado)
-        return item
+
+    vizinhos = _buscar_vizinhos_mongo_wrapper(emb, k=k)
+    resultado = _inferir_categoria_knn(vizinhos)
+    if resultado:
+        item.update(resultado)
+    return item
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futuros = [executor.submit(processar_item, item) for item in resultados]
@@ -2307,4 +2319,5 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
