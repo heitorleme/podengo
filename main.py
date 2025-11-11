@@ -129,10 +129,6 @@ def _sanitize_items(resultados):
                 ]
             }
 
-            # 🔧 NOVO: remove o campo 'vectorized_embedding' dentro de 'embedding'
-            if isinstance(item_para_upload.get("embedding"), dict):
-                item_para_upload["embedding"].pop("vectorized_embedding", None)
-
             item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
             item_para_upload["upload_timestamp"] = datetime.now()
             itens_para_upload.append(item_para_upload)
@@ -222,6 +218,10 @@ def main(urls_or_text: Union[str, Iterable[str]]):
         r.pop("audio_id", None)
         r.pop("audio_snapshot", None)
 
+            # 🔧 Remove o vetor de embedding (muito grande para Excel)
+        if isinstance(r.get("embedding"), dict):
+            r["embedding"].pop("vectorized_embedding", None)
+
     # DataFrame baseado em itens_para_upload (mesmos dados enviados ao Mongo)
     df = pd.DataFrame(itens_para_upload)
     if not df.empty:
@@ -243,5 +243,6 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
 
