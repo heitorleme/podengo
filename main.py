@@ -160,7 +160,7 @@ def _to_xlsx_bytes(df: pd.DataFrame) -> Tuple[bytes, str]:
 # ----------------------------
 # Função principal
 # ----------------------------
-def main(urls_or_text: Union[str, Iterable[str]]):
+def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
     """
     Aceita:
       - string com 'uma URL por linha'
@@ -182,7 +182,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
     print("Exemplos:", urls[:3])
 
     try:
-        resultados = _run_async_pipeline(urls)
+        resultados = _run_async_pipeline(urls, progress_callback=progress_callback)
     except Exception as e:
         print(f"[ERRO] Falha ao executar pipeline: {type(e).__name__}: {e}")
         return {
@@ -246,6 +246,7 @@ def main(urls_or_text: Union[str, Iterable[str]]):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
 
 
