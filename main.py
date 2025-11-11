@@ -245,9 +245,3 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
-
-
-
-
-
-
