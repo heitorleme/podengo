@@ -2347,7 +2347,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
             return
         try:
             percent = max(0.0, min(1.0, percent))  # mantém entre 0 e 1
-            progress_callback(round(percent * 100, 2), msg)  # envia 0–100%
+            progress_callback(round(percent, 2), msg)  # envia 0–100%
         except Exception as e:
             print(f"[Aviso] progress_callback falhou: {e}")
 
@@ -2415,3 +2415,4 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
 
     _safe_progress(1.0, "✅ Finalizado com sucesso!")
     return resultados
+
