@@ -2309,12 +2309,13 @@ async def fetch_social_post_summary_async(
     tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
     return results
 
-async def rodar_pipeline(urls: List[str]) -> List[dict]:
+async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     """
-    1) Busca/baixa os posts (TikTok/Instagram) salvando mídia em ./media
-    2) Transcreve em paralelo (e extrai frames); anexa em 'transcricao', 'base64Frames'
-    3) Deleta os arquivos de mídia locais
-    4) Retorna a lista de resultados enriquecida
+    1) Busca/baixa os posts (TikTok/Instagram)
+    2) Transcreve + extrai frames
+    3) Gera embeddings
+    4) Classifica via Vector Search
+    5) Limpa mídia temporária
     """
     if urls is None or (isinstance(urls, (list, tuple, set)) and len(urls) == 0) \
        or (isinstance(urls, pd.Series) and urls.empty) \
@@ -2322,24 +2323,50 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         print("Nenhuma URL fornecida.")
         return []
 
+    total_steps = 5
+    step = 0
+
+    def update_step(msg):
+        nonlocal step
+        step += 1
+        if progress_callback:
+            progress_callback(step / total_steps, msg)
+
+    # ----------------------------
+    # 1️⃣ Buscar/baixar posts
+    # ----------------------------
+    update_step("🔍 Buscando e baixando posts...")
     resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=1000)
     if not resultados:
         print("Nenhum resultado retornado pelos scrapers.")
         return []
 
+    # ----------------------------
+    # 2️⃣ Transcrever e extrair frames
+    # ----------------------------
+    update_step("🎙️ Transcrevendo e extraindo frames...")
     anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=True)
 
-    # Gerar embeddings para os resultados
+    # ----------------------------
+    # 3️⃣ Gerar embeddings
+    # ----------------------------
+    update_step("🧠 Gerando embeddings...")
     resultados = gerar_embeddings(resultados)
 
-    # Classificação via MongoDB Atlas Vector Search (KNN)
+    # ----------------------------
+    # 4️⃣ Classificar via Mongo Vector Search
+    # ----------------------------
+    update_step("🏷️ Classificando resultados...")
     resultados = classificar_via_mongo_vector_search(resultados, k=5)
 
+    # ----------------------------
+    # 5️⃣ Limpar arquivos temporários
+    # ----------------------------
+    update_step("🧹 Limpando diretórios temporários...")
     caminhos = _coletar_caminhos_midia(resultados)
     _deletar_arquivos(caminhos)
     _deletar_pasta_se_vazia(Path(media))
 
-    # Limpa diretório temporário global (tmp)
     tmpdir = Path(BASE_DIR) / "tmp"
     if tmpdir.exists():
         for f in tmpdir.iterdir():
@@ -2348,5 +2375,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
             except Exception:
                 pass
         _deletar_pasta_se_vazia(tmpdir)
+
+    update_step("✅ Finalizado com sucesso!")
 
     return resultados
