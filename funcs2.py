@@ -2095,6 +2095,8 @@ def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
     """
     def processar_item(item):
         emb = (item.get("embedding") or {}).get("vectorized_embedding")
+        if isinstance(emb, np.ndarray):
+            emb = emb.tolist()
         if not emb:
             return item
         vizinhos = _buscar_vizinhos_mongo_wrapper(emb, k=k)
@@ -2305,3 +2307,4 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
