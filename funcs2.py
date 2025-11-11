@@ -1887,7 +1887,7 @@ def anexar_transcricoes_threaded(
                 try:
                     callback(concluídos, total)
                 except Exception:
-                    pass  # callback nunca deve travar o processamento
+                    tlog(f"[CALLBACK] ⚠️ erro no callback de progresso: {e}")
 
     # segurança: garante ai_model_data em todos (inclusive vindos do Mongo ou sem mídia)
     for item in resultados:
@@ -2363,15 +2363,17 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     total_videos = len(resultados)
     progresso_local = 0
 
-    def local_progress():
+    def local_progress(concluidos=None, total=None):
         nonlocal progresso_local
         progresso_local += 1
         if progress_callback:
-            # Progresso da etapa 2 representando de 20% a 60% do total
             progresso_total = (1 + (progresso_local / total_videos) * 2) / total_steps
-            progress_callback(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
+            progress_callback(
+                progresso_total,
+                f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})..."
+            )
 
-    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=True, callback=local_progress)
+    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
 
     # ----------------------------
     # 3️⃣ Gerar embeddings
@@ -2404,4 +2406,5 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
 
     update_step("✅ Finalizado com sucesso!")
     return resultados
+
 
