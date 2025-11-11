@@ -80,15 +80,14 @@ def _ensure_urls(obj: Union[str, Iterable[str]]) -> List[str]:
 # ----------------------------
 # Execução assíncrona
 # ----------------------------
-def _run_async_pipeline(urls: List[str]):
+def _run_async_pipeline(urls: List[str], progress_callback=None):
     try:
         import platform
         if platform.system() == "Windows":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore
     except Exception:
         pass
-    return asyncio.run(rodar_pipeline(urls))
-
+    return asyncio.run(rodar_pipeline(urls, progress_callback=progress_callback))
 
 # ----------------------------
 # Sanitização dos resultados (apenas para upload)
@@ -246,6 +245,7 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
 
 
