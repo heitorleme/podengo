@@ -1971,7 +1971,20 @@ VECTOR_INDEX_NAME = "comm_ref_vector_index"
 # Função para buscar os vizinhos no Mongo
 def _buscar_vizinhos_mongo(embedding_vector, k=5):
     """Busca os k vizinhos mais próximos no MongoDB Atlas Vector Search."""
-    if not embedding_vector:
+    if embedding_vector is None:
+        return []
+
+    # Garante que seja uma lista de floats
+    if isinstance(embedding_vector, np.ndarray):
+        embedding_vector = embedding_vector.tolist()
+    elif not isinstance(embedding_vector, list):
+        try:
+            embedding_vector = list(embedding_vector)
+        except Exception:
+            print("[CLUSTER] Embedding inválido — não iterável.")
+            return []
+
+    if len(embedding_vector) == 0:
         return []
 
     db = _connect_to_mongo()
@@ -1981,7 +1994,7 @@ def _buscar_vizinhos_mongo(embedding_vector, k=5):
         {
             "$vectorSearch": {
                 "index": VECTOR_INDEX_NAME,
-                "path": "embedding",  # campo vetorial na coleção de referência
+                "path": "embedding",
                 "queryVector": embedding_vector,
                 "numCandidates": 100,
                 "limit": k
@@ -2292,22 +2305,3 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
