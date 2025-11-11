@@ -1968,6 +1968,95 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-larg
 # Nome do índice vetorial no Atlas
 VECTOR_INDEX_NAME = "comm_ref_vector_index"
 
+# Função para buscar os vizinhos no Mongo
+def _buscar_vizinhos_mongo(embedding_vector, k=5):
+    """Busca os k vizinhos mais próximos no MongoDB Atlas Vector Search."""
+    if not embedding_vector:
+        return []
+
+    db = _connect_to_mongo()
+    collection_ref = db["comunidades-ref"]
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": VECTOR_INDEX_NAME,
+                "path": "embedding",  # campo vetorial na coleção de referência
+                "queryVector": embedding_vector,
+                "numCandidates": 100,
+                "limit": k
+            }
+        },
+        {
+            "$project": {
+                "_id": 1,
+                "score": {"$meta": "vectorSearchScore"},
+                "comunidade": 1,
+                "categoria_principal": 1,
+                "subcategoria": 1
+            }
+        }
+    ]
+
+    try:
+        resultados = list(collection_ref.aggregate(pipeline))
+        return resultados
+    except Exception as e:
+        print(f"[CLUSTER] Erro ao buscar vizinhos no MongoDB: {e}")
+        return []
+
+# Função para inferir categoria
+def _inferir_categoria_knn(vizinhos):
+    """Determina comunidade/categoria/subcategoria predominantes ponderando pelos scores."""
+    if not vizinhos:
+        return None
+
+    comunidades = [v.get("comunidade") for v in vizinhos if v.get("comunidade")]
+    categorias = [v.get("categoria_principal") for v in vizinhos if v.get("categoria_principal")]
+    subcategorias = [v.get("subcategoria") for v in vizinhos if v.get("subcategoria")]
+    scores = np.array([v.get("score", 0) for v in vizinhos])
+
+    def ponderar(valores, distancias, epsilon: float = 1e-9):
+        """
+        Calcula pesos normalizados proporcionalmente à proximidade (1 / distância).
+        - Se todas as distâncias forem iguais → pesos iguais.
+        - Quanto menor a distância, maior o peso.
+        - Evita divisões por zero com epsilon.
+        """
+        if not valores or not distancias or len(valores) != len(distancias):
+            return None, {}
+    
+        dist = np.array(distancias, dtype=float)
+        # converte distâncias em pesos inversos (menor distância = maior peso)
+        inv_dist = 1 / (dist + epsilon)
+    
+        # normaliza pesos para somarem 1
+        pesos_norm = inv_dist / inv_dist.sum()
+    
+        pesos_dict = {}
+        for val, peso in zip(valores, pesos_norm):
+            if val:
+                pesos_dict[val] = pesos_dict.get(val, 0.0) + float(peso)
+    
+        if not pesos_dict:
+            return None, {}
+    
+        proporcoes = {k: round(v * 100, 1) for k, v in pesos_dict.items()}
+        valor_predito = max(proporcoes, key=proporcoes.get)
+        return valor_predito, proporcoes
+
+    comunidade_predita, comunidades_prop = ponderar(comunidades, scores)
+    categoria_predita, _ = ponderar(categorias, scores)
+    subcategoria_predita, _ = ponderar(subcategorias, scores)
+
+    return {
+        "comunidade_predita": comunidade_predita,
+        "categoria_principal": categoria_predita,
+        "subcategoria": subcategoria_predita,
+        "comunidades_proporcoes": comunidades_prop
+    }
+
+
 # cache para resultados de vizinhos repetidos
 def _hash_embedding(embedding):
     # cria uma chave única e compacta para o vetor
@@ -2208,6 +2297,7 @@ async def rodar_pipeline(urls: List[str]) -> List[dict]:
         _deletar_pasta_se_vazia(tmpdir)
 
     return resultados
+
 
 
 
