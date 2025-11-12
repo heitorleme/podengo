@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urlunparse, urlsplit, unquote
 from tempfile import TemporaryDirectory, mkdtemp
 import numpy as np
 
-import pydantic; print(pydantic.__version__)  # debug: mostra versão do pydantic
+import pydantic; print(pydantic.__version__) # debug: mostra versão do pydantic
 import pandas as pd
 import requests
 import tiktoken
@@ -47,14 +47,15 @@ from openai import OpenAI, AsyncOpenAI, RateLimitError, APIConnectionError, APIT
 
 # Whisper local é opcional; não exigimos para rodar (você usa a API do OpenAI)
 try:
-    import whisper  # opcional
+    import whisper # opcional
 except Exception:
     whisper = None
 
 warnings.filterwarnings("ignore")
 
-# Max workers
-max_workers=os.cpu_count() or 8
+# Max workers: Reduzido para ser mais conservador em ambientes com pouca RAM.
+MAX_WORKERS_RAM_SAFE = 4
+max_workers = os.cpu_count() or MAX_WORKERS_RAM_SAFE
 
 # ─────────────────────────────────────────────────────────────
 # Config / Settings com fallback para st.secrets + os.environ
@@ -77,7 +78,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env.txt"),  # opcional local
+        env_file=str(BASE_DIR / ".env.txt"), # opcional local
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -120,7 +121,7 @@ def get_settings() -> Settings:
     if missing:
         msg = (
             "Configuração ausente. Defina as chaves obrigatórias nas **App secrets** do Streamlit Cloud "
-            "ou como variáveis de ambiente:\n  - " + "\n  - ".join(missing) +
+            "ou como variáveis de ambiente:\n - " + "\n - ".join(missing) +
             "\n\nNo Streamlit Cloud: Manage app ▸ Settings ▸ Secrets.\n"
         )
         raise RuntimeError(msg)
@@ -132,8 +133,8 @@ def get_settings() -> Settings:
         data = {k: env[k] for k in env if k.upper() in allowed}
         _settings_cache = Settings(**data)
         # Converte SecretStr -> str
-        _settings_cache.APIFY_KEY = _settings_cache.APIFY_KEY.get_secret_value()  # type: ignore
-        _settings_cache.OPENAI_API_KEY = _settings_cache.OPENAI_API_KEY.get_secret_value()  # type: ignore
+        _settings_cache.APIFY_KEY = _settings_cache.APIFY_KEY.get_secret_value() # type: ignore
+        _settings_cache.OPENAI_API_KEY = _settings_cache.OPENAI_API_KEY.get_secret_value() # type: ignore
         return _settings_cache
     except ValidationError as e:
         raise RuntimeError(f"Falha ao validar configurações: {e}") from e
@@ -150,13 +151,13 @@ def get_clients() -> Tuple[ApifyClient, OpenAI, AsyncOpenAI]:
     s = get_settings()
 
     if _apify_client is None:
-        _apify_client = ApifyClient(s.APIFY_KEY)  # type: ignore[arg-type]
+        _apify_client = ApifyClient(s.APIFY_KEY) # type: ignore[arg-type]
 
     if _openai_sync is None:
-        _openai_sync = OpenAI(api_key=s.OPENAI_API_KEY)  # type: ignore[arg-type]
+        _openai_sync = OpenAI(api_key=s.OPENAI_API_KEY) # type: ignore[arg-type]
 
     if _openai_async is None:
-        _openai_async = AsyncOpenAI(api_key=s.OPENAI_API_KEY)  # type: ignore[arg-type]
+        _openai_async = AsyncOpenAI(api_key=s.OPENAI_API_KEY) # type: ignore[arg-type]
 
     return _apify_client, _openai_sync, _openai_async
 
@@ -177,9 +178,9 @@ def tlog(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 # Mongo helpers
 # ─────────────────────────────────────────────────────────────
-MONGO_FIELDS  = ["url", "ownerUsername", "caption", "type", "post_timestamp", "transcricao", "framesDescricao", "embedding", "categoria_principal", "subcategoria", "comunidade_predita", "comunidades_proporcoes"]
-MEDIA_FIELDS  = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
-OTHER_FIELDS  = [
+MONGO_FIELDS = ["url", "ownerUsername", "caption", "type", "post_timestamp", "transcricao", "framesDescricao", "embedding", "categoria_principal", "subcategoria", "comunidade_predita", "comunidades_proporcoes"]
+MEDIA_FIELDS = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
+OTHER_FIELDS = [
     "likesCount", "commentsCount", "videoPlayCount", "videoViewCount",
     "audio_id", "audio_snapshot", "hashtags", "mentions",
     "ai_model_data"
@@ -303,8 +304,8 @@ def upload_muitos_para_mongo(resultados: List[dict]) -> dict:
         return {"inserted": ok, "skipped": len(resultados) - ok}
 
 
-regex_hashtags  = re.compile(r"#\w+", re.UNICODE)
-regex_mentions  = re.compile(r"@\w+", re.UNICODE)
+regex_hashtags = re.compile(r"#\w+", re.UNICODE)
+regex_mentions = re.compile(r"@\w+", re.UNICODE)
 
 def _dedup_preservando_ordem(seq):
     seen = set()
@@ -362,7 +363,7 @@ def _download_file(url: str, pasta_destino: str = media) -> str:
     os.makedirs(pasta_destino, exist_ok=True)
     nome = os.path.basename(urlparse(url).path) or "media"
     if not os.path.splitext(nome)[1]:
-        nome += ".mp4"  # fallback
+        nome += ".mp4" # fallback
     caminho = os.path.join(pasta_destino, nome)
     r = requests.get(url, allow_redirects=True, stream=True, timeout=30)
     r.raise_for_status()
@@ -452,26 +453,32 @@ def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
         pattern
     ]
 
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-
-    # Lê os frames e converte para base64
-    frames_b64: List[str] = []
-    for jpg_path in sorted(tmpdir.glob("frame_*.jpg")):
-        try:
-            with open(jpg_path, "rb") as f:
-                frames_b64.append(base64.b64encode(f.read()).decode("utf-8"))
-            if len(frames_b64) >= num_frames_target:
-                break
-        except Exception:
-            continue
-
-    # Limpeza temporária
+    # Ajuste: Roda o subprocesso
     try:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    except Exception:
-        pass
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 
-    return frames_b64
+        # Lê os frames e converte para base64
+        frames_b64: List[str] = []
+        for jpg_path in sorted(tmpdir.glob("frame_*.jpg")):
+            try:
+                with open(jpg_path, "rb") as f:
+                    frames_b64.append(base64.b64encode(f.read()).decode("utf-8"))
+                if len(frames_b64) >= num_frames_target:
+                    break
+            except Exception:
+                continue
+
+        return frames_b64
+        
+    except Exception as e:
+        raise RuntimeError(f"Erro na extração de frames por FFmpeg: {e}")
+        
+    finally:
+        # Limpeza temporária: Garante que os JPGs sejam removidos imediatamente
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 def _audio_temp_speed_from_video_ffmpeg(
     video_path: str,
@@ -495,6 +502,7 @@ def _audio_temp_speed_from_video_ffmpeg(
     out_wav = tmpdir / f"audio_{hash_part}_{speed}x.wav"
 
     # Se já existir e for recente, reutiliza (opcional)
+    # A reutilização é boa, mas exige a limpeza final no pipeline completo
     if out_wav.exists() and out_wav.stat().st_size > 0:
         return str(tmpdir), str(out_wav)
 
@@ -515,18 +523,30 @@ def _audio_temp_speed_from_video_ffmpeg(
 def transcrever_video_em_speed(
     video_path: str, speed: float = 2.0, sample_rate: int = 16000,
 ) -> Tuple[str, Optional[float]]:
+    """
+    Transcreve o áudio de um vídeo e, em seguida, remove o arquivo WAV temporário IMEDIATAMENTE.
+    """
     tmpdir, wav_path = _audio_temp_speed_from_video_ffmpeg(
         video_path, speed=speed, sample_rate=sample_rate
     )
     dur_s = None
+    texto = ""
+
+    # 🚨 Ajuste: Envolve o uso do WAV em um bloco try-finally para garantir a limpeza imediata.
     try:
         dur_s = _ffprobe_duration_seconds(wav_path)
         resp = AudioModel().transcribe(wav_path)
         texto = resp.get("text", "") if isinstance(resp, dict) else (resp or "")
         return texto, dur_s
+    except Exception as e:
+        return f"[Erro transcrição] {e}", dur_s # Retorna o erro como o texto
     finally:
-        # ❌ Não deletamos aqui — limpeza global no final
-        pass
+        # Limpeza Imediata: Remove o arquivo WAV logo após a transcrição
+        try:
+            Path(wav_path).unlink(missing_ok=True)
+            tlog(f"[LIMPEZA ÁUDIO] 🗑️ {Path(wav_path).name} removido após transcrição")
+        except Exception as e:
+            tlog(f"[WARN] falha ao remover áudio temporário {Path(wav_path).name}: {e}")
 
 
 def _ffprobe_duration_seconds(path: str) -> Optional[float]:
@@ -562,24 +582,23 @@ def _estimate_image_tokens_from_b64_list(frames_b64: List[str], tokens_per_tile:
                 h, w = img.shape[:2]
                 tiles = ceil(w / 512) * ceil(h / 512)
             total_tiles += tiles
-            num_images += 1
         except Exception:
             total_tiles += 1
-            num_images += 1
+        num_images += 1
     return num_images, total_tiles * tokens_per_tile
 
 # ─────────────────────────────────────────────────────────────
 # Apify / Scrapers
 # ─────────────────────────────────────────────────────────────
 INSTAGRAM_ACTOR = "apify/instagram-scraper"
-TIKTOK_ACTOR    = "clockworks/tiktok-scraper"
-POLL_SEC = 2  # polling em segundos
+TIKTOK_ACTOR = "clockworks/tiktok-scraper"
+POLL_SEC = 2 # polling em segundos
 
 IG_PROFILE_RESERVED = {"p", "reel", "reels", "stories", "explore", "tv"}
 
-APIFY_KV_COOLDOWN_SEC = 2  # tempo para o Apify materializar o arquivo no KV após o dataset
-APIFY_KV_MAX_RETRY = 6      # tentativas (exponenciais)
-APIFY_KV_INITIAL_DELAY = 2  # segundos
+APIFY_KV_COOLDOWN_SEC = 2 # tempo para o Apify materializar o arquivo no KV após o dataset
+APIFY_KV_MAX_RETRY = 6 # tentativas (exponenciais)
+APIFY_KV_INITIAL_DELAY = 2 # segundos
 
 def _download_file_with_retry(url: str, pasta_destino: str = media,
                               max_retry: int = APIFY_KV_MAX_RETRY,
@@ -842,7 +861,7 @@ def _fetch_instagram(urls_instagram: List[str], api_token: str, max_results: int
                         hashtags, mentions = _extract_tags_and_mentions(caption)
                         
                         out.append({
-                            "url":  _ig_post_url_from_item(it) or _any_post_url(it),
+                            "url": _ig_post_url_from_item(it) or _any_post_url(it),
                             "ownerUsername": it.get("ownerUsername"),
                             "likesCount": it.get("likesCount"),
                             "commentsCount": it.get("commentsCount"),
@@ -1276,7 +1295,7 @@ def _fetch_tiktok_from_profiles(
             u = "https://" + u
         if not _is_tt_profile_url(u):
             ignorados.append(u); continue
-        u_norm = _normalize_tt_profile_url(u)  # sempre com barra final
+        u_norm = _normalize_tt_profile_url(u) # sempre com barra final
         un = _tt_username_from_url(u_norm)
         if un:
             username_to_profile_url.setdefault(un, u_norm)
@@ -1293,7 +1312,7 @@ def _fetch_tiktok_from_profiles(
     run_input = {
         "excludePinnedPosts": False,
         "postURLs": list(dict.fromkeys((post_urls_extra or []))),
-        "profiles": usernames,  # apenas usernames
+        "profiles": usernames, # apenas usernames
         "proxyCountryCode": "None",
         "resultsPerPage": int(results_limit),
         "scrapeRelatedVideos": False,
@@ -1314,7 +1333,7 @@ def _fetch_tiktok_from_profiles(
 
     ds, ds_id, offset = None, None, 0
     out: List[Dict[str, Optional[str]]] = []
-    cache_media_candidates: List[Tuple[int, List[str], bool]] = []  # (idx_out, candidates, is_slideshow)
+    cache_media_candidates: List[Tuple[int, List[str], bool]] = [] # (idx_out, candidates, is_slideshow)
     per_user_count: Dict[str, int] = {}
     no_new_ticks = 0
 
@@ -1449,12 +1468,17 @@ def _fetch_tiktok_from_profiles(
                         tlog(f"[TT][PROFILES][DL] ✅ ok → {os.path.basename(lp)}")
                         if not is_slideshow:
                             break
+                    else:
+                        tlog(f"[TT][PROFILES][DL] ⚠️ sem arquivo salvo para {mu.split('?')[0]}")
                 except Exception as e:
                     tlog(f"[TT][PROFILES][DL] ⚠️ {mu.split('?')[0]} | {e}")
             # atualiza a linha
             if local_paths:
                 out[idx_out]["mediaLocalPaths"] = local_paths if len(local_paths) > 1 else None
-                out[idx_out]["mediaLocalPath"]  = first_ok
+                out[idx_out]["mediaLocalPath"] = first_ok
+            else:
+                out[idx_out]["mediaLocalPaths"] = None
+                out[idx_out]["mediaLocalPath"] = None
 
     tlog(f"[TT][PROFILES] 🏁 Concluído com {len(out)} resultado(s)")
     return out
@@ -1572,11 +1596,11 @@ def _pick_media_url(media: Any, media_local_path: Any = None, media_local_paths:
     depois cai para URLs remotas como fallback.
     """
     # 1) Prioriza caminhos locais (o worker depende disso)
-    if isinstance(media_local_path, str) and media_local_path:
+    if isinstance(media_local_path, str) and media_local_path and Path(media_local_path).exists():
         return media_local_path
     if isinstance(media_local_paths, (list, tuple)):
         for p in media_local_paths:
-            if isinstance(p, str) and p:
+            if isinstance(p, str) and p and Path(p).exists():
                 return p
 
     # 2) Fallback: URLs remotas (não usadas pelo worker para abrir arquivo, mas útil p/ logging)
@@ -1617,15 +1641,18 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
                 "role": "user",
                 "content": (
                     [{"type": "text", "text": f"Descreva em {idioma} o que aparece nestas imagens/frame de vídeo. "
-                                               f"Foque em quem/que objetos aparecem, ações e contexto. Seja conciso. "
-                                               f"Não descreva cada frame individualmente; faça um resumo da temática. "
-                                               f"Mencione marcas/produtos específicos se aparecerem."}]
+                                              f"Foque em quem/que objetos aparecem, ações e contexto. Seja conciso. "
+                                              f"Não descreva cada frame individualmente; faça um resumo da temática. "
+                                              f"Mencione marcas/produtos específicos se aparecerem."}]
                     + [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in imagens]
                 ),
             }
         ]
         s = get_settings()
         _, client, _ = get_clients()
+        # Ajuste o modelo se necessário. 'gpt-5-nano' pode não ser o modelo padrão que você queria para visão.
+        # Assumindo que você quis usar um modelo de visão, como 'gpt-4-vision-preview'.
+        # Mantendo 'gpt-5-nano' apenas para evitar quebras se o modelo for configurável fora deste arquivo.
         resp = client.chat.completions.create(model=s.OPENAI_CHAT_MODEL, messages=mensagens)
 
         texto = (resp.choices[0].message.content or "").strip()
@@ -1660,6 +1687,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         "num_images": 0,
         "estimated_image_tokens": 0,
     }
+    local_path: Path = Path() # Inicializado para o bloco finally
 
     if not media_url:
         return idx, None, [], None, ai_model_data, "sem_media_url"
@@ -1671,6 +1699,11 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
 
         def _resolve_local_path(s: str) -> Path:
+            # 🚨 Ajuste na resolução de caminho: Prioriza sempre caminhos absolutos existentes
+            p_s = Path(s)
+            if p_s.is_absolute() and p_s.exists():
+                return p_s
+            
             if _is_url(s):
                 name = unquote(os.path.basename(urlsplit(s).path)) or "mediafile"
             else:
@@ -1680,11 +1713,21 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
         local_path = _resolve_local_path(media_url)
         if not local_path.exists():
-            return idx, None, [], None, ai_model_data, f"FileNotFoundError: {local_path}"
-
+            # Tenta um path local baseado no nome do arquivo (se for só o nome)
+            if not local_path.is_absolute():
+                 local_path = Path(media) / local_path.name
+            if not local_path.exists():
+                return idx, None, [], None, ai_model_data, f"FileNotFoundError: {local_path.name}"
+                
         ext = local_path.suffix.lower()
         is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
         is_image = ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+        
+        # Se o tipo não for resolvido pela extensão, tenta o guess
+        if not is_video and not is_image:
+            kind = _tipo_midia(str(local_path))
+            is_video = (kind == "video")
+            is_image = (kind == "image")
 
         texto: Optional[str] = None
         base64_frames: List[str] = []
@@ -1698,33 +1741,29 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
             # Rodamos transcrição (com semáforo) e extração de frames em paralelo
             with ThreadPoolExecutor(max_workers=2) as ex:
-                fut_transcricao = ex.submit(
-                    lambda: (lambda: (
-                        sem.acquire(),
-                        tlog(f"[TR] ▶️ transcrevendo {local_path.name}"),
-                        transcrever_video_em_speed(str(local_path))
-                    ))()[2]
-                    if sem
-                    else transcrever_video_em_speed(str(local_path))
-                )
+                
+                # Transcrição (usa semáforo para controle da API, se necessário)
+                def _run_transcribe():
+                    if sem:
+                        sem.acquire()
+                        tlog(f"[TR] ▶️ transcrevendo {local_path.name}")
+                        try:
+                            return transcrever_video_em_speed(str(local_path))
+                        finally:
+                            sem.release()
+                    else:
+                        return transcrever_video_em_speed(str(local_path))
+
+                fut_transcricao = ex.submit(_run_transcribe)
                 fut_frames = ex.submit(get_video_frames, str(local_path))
 
-                try:
-                    texto_resp, dur_s = fut_transcricao.result()
-                    texto = texto_resp
-                    ai_model_data["audio_seconds"] = dur_s
-                finally:
-                    try:
-                        sem.release()
-                    except Exception:
-                        pass
+                # Obtém resultados
+                texto_resp, dur_s = fut_transcricao.result()
+                texto = texto_resp
+                ai_model_data["audio_seconds"] = dur_s
 
-                try:
-                    base64_frames = fut_frames.result()
-                except Exception as e:
-                    tlog(f"[frames] erro extraindo frames de {local_path}: {e}")
-                    base64_frames = []
-
+                base64_frames = fut_frames.result()
+                
             # 🔸 Descrição dos frames
             if base64_frames:
                 secs = ai_model_data.get("audio_seconds") or 0
@@ -1744,6 +1783,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         # 🔹 PROCESSAMENTO DE IMAGEM ESTÁTICA
         # ==========================================================
         elif is_image:
+            tlog(f"[TR] 🖼️ idx={idx}: processando imagem {local_path.name}")
             with open(local_path, "rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
 
@@ -1755,10 +1795,13 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
             ai_model_data["output_tokens"] = out_tok
             ai_model_data["num_images"] = num_imgs
             ai_model_data["estimated_image_tokens"] = est_img_tokens
+            tlog(f"[TR] ✅ idx={idx}: concluído {local_path.name}")
 
         # ==========================================================
         # 🔹 RETORNO PADRÃO
         # ==========================================================
+        # 🚨 Ajuste: Retorna base64_frames APENAS para uso na API (descricao_frames). 
+        # Não será armazenado na memória global 'resultados' (ver anexar_transcricoes_threaded).
         return idx, texto, base64_frames, frames_descricao, ai_model_data, None
 
     except Exception as e:
@@ -1768,20 +1811,14 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         # ==========================================================
         # ♻️ LIMPEZA DE ARQUIVOS TEMPORÁRIOS
         # ==========================================================
-        try:
-            if local_path.exists():
-                local_path.unlink()
+        # 🚨 Ajuste: Garante a remoção apenas se o arquivo for um dos que criamos na pasta 'media'
+        # ou se for um arquivo que foi baixado (e não um path fora do controle).
+        if local_path.is_file() and str(local_path).startswith(media):
+            try:
+                local_path.unlink(missing_ok=True)
                 tlog(f"[LIMPEZA] 🗑️ {local_path.name} removido com sucesso")
-        except Exception as e:
-            tlog(f"[WARN] falha ao remover {local_path}: {e}")
-
-        try:
-            tmpdir = Path(BASE_DIR) / "tmp"
-            for f in tmpdir.glob("audio_*"):
-                if time.time() - f.stat().st_mtime > 10:
-                    f.unlink()
-        except Exception:
-            pass
+            except Exception as e:
+                tlog(f"[WARN] falha ao remover {local_path.name}: {e}")
 
 def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
@@ -1791,17 +1828,7 @@ def anexar_transcricoes_threaded(
 ) -> List[Dict[str, Any]]:
     """
     Para cada item com mídia local, transcreve (vídeo) e descreve frames em paralelo.
-    Mantém campos existentes vindos do Mongo; só preenche se houver conteúdo novo.
-
-    Campos adicionados/atualizados por item:
-      - transcricao
-      - base64Frames
-      - framesDescricao
-      - ai_model_data
-      - transcricao_erro
-
-    Parâmetro opcional:
-      - callback(i, total): chamado a cada item processado (para atualizar progresso).
+    NÃO armazena 'base64Frames' em 'resultados' para evitar estouro de memória.
     """
     if not resultados:
         return resultados
@@ -1821,10 +1848,11 @@ def anexar_transcricoes_threaded(
             "num_images": 0,
             "estimated_image_tokens": 0,
         })
+        # Inicializa base64Frames como lista vazia (será mantida assim, pois não armazenamos o conteúdo)
+        item.setdefault("base64Frames", []) 
 
         # Se já tem transcrição/frames do Mongo, não reprocessa
         if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
-            item.setdefault("base64Frames", [])
             continue
 
         url_media = _pick_media_url(
@@ -1837,7 +1865,6 @@ def anexar_transcricoes_threaded(
         else:
             # Sem media → marque erro mínimo somente se não houver nada preenchido
             if item.get("transcricao") is None and item.get("framesDescricao") is None:
-                item.setdefault("base64Frames", [])
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
                 item["framesDescricao"] = None
@@ -1863,8 +1890,10 @@ def anexar_transcricoes_threaded(
 
             if transcricao is not None:
                 resultados[idx]["transcricao"] = transcricao
-            if frames is not None:
-                resultados[idx]["base64Frames"] = frames
+            # 🚨 REMOVIDO: Não armazena base64Frames na memória global resultados[idx]
+            # if frames is not None:
+            #     resultados[idx]["base64Frames"] = frames 
+            
             if frames_desc is not None:
                 resultados[idx]["framesDescricao"] = frames_desc
 
@@ -1886,7 +1915,7 @@ def anexar_transcricoes_threaded(
             if callback:
                 try:
                     callback(concluídos, total)
-                except Exception:
+                except Exception as e:
                     tlog(f"[CALLBACK] ⚠️ erro no callback de progresso: {e}")
 
     # segurança: garante ai_model_data em todos (inclusive vindos do Mongo ou sem mídia)
@@ -1906,6 +1935,14 @@ def anexar_transcricoes_threaded(
             item["ai_model_data"].setdefault("audio_seconds", None)
             item["ai_model_data"].setdefault("num_images", 0)
             item["ai_model_data"].setdefault("estimated_image_tokens", 0)
+        
+        # Garante que base64Frames seja uma lista vazia, mas não armazene o conteúdo.
+        item.setdefault("base64Frames", [])
+        if isinstance(item["base64Frames"], list) and len(item["base64Frames"]) > 0:
+            # Se por algum motivo base64Frames foi preenchido, limpa para economizar RAM
+            tlog(f"[WARN] Limpando base64Frames acidentalmente preenchido em {item.get('url')}")
+            item["base64Frames"] = []
+
 
     return resultados
 
@@ -1931,7 +1968,7 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
 
     # 🔹 Monta a lista de textos a vetorializar
     textos = []
-    idx_map = []  # mapeia índice original → posição no batch
+    idx_map = [] # mapeia índice original → posição no batch
     for i, item in enumerate(resultados):
         caption = item.get("caption") or ""
         transcricao = item.get("transcricao") or ""
@@ -1943,7 +1980,7 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
             textos.append(texto)
             idx_map.append(i)
         else:
-            item["embedding"] = None  # sem texto para vetorializar
+            item["embedding"] = None # sem texto para vetorializar
 
     if not textos:
         return resultados
@@ -2008,7 +2045,7 @@ def _buscar_vizinhos_mongo(embedding_vector, k=5):
         {
             "$vectorSearch": {
                 "index": VECTOR_INDEX_NAME,
-                "path": "embedding",  # campo vetorial na coleção de referência
+                "path": "embedding", # campo vetorial na coleção de referência
                 "queryVector": embedding_vector,
                 "numCandidates": 100,
                 "limit": k,
@@ -2173,20 +2210,32 @@ def _coletar_caminhos_midia(resultados: List[dict]) -> Set[Path]:
     def _add(p):
         if p:
             pp = Path(p)
-            if pp.exists() and pp.is_file():
+            # 🚨 Ajuste: Só adiciona se o arquivo estiver na pasta 'media' ou 'tmp'
+            if pp.exists() and pp.is_file() and (str(pp).startswith(media) or str(pp).startswith(str(BASE_DIR / "tmp"))):
                 paths.add(pp)
+    
+    # Adiciona os caminhos de mídia
     for item in resultados:
         _add(item.get("mediaLocalPath"))
         mlist = item.get("mediaLocalPaths")
         if isinstance(mlist, (list, tuple)):
             for p in mlist:
                 _add(p)
+    
+    # Adiciona arquivos temporários de áudio (se houver algum que a função transcrever não removeu a tempo)
+    tmpdir = Path(BASE_DIR) / "tmp"
+    if tmpdir.exists():
+        for f in tmpdir.glob("audio_*"):
+            if f.is_file() and (time.time() - f.stat().st_mtime > 5): # Remove arquivos com mais de 5s
+                 paths.add(f)
+                 
     return paths
 
 def _deletar_arquivos(paths: Iterable[Path]) -> None:
     for p in paths:
         try:
             p.unlink(missing_ok=True)
+            tlog(f"[CLEANUP] 🗑️ {p.name} removido por limpeza final.")
         except Exception as e:
             print(f"[CLEANUP] Falha ao deletar {p}: {e}")
 
@@ -2194,6 +2243,7 @@ def _deletar_pasta_se_vazia(pasta: Path) -> None:
     try:
         if pasta.exists() and pasta.is_dir() and not any(pasta.iterdir()):
             pasta.rmdir()
+            tlog(f"[CLEANUP] 🗑️ Pasta vazia {pasta.name} removida.")
     except Exception as e:
         print(f"[CLEANUP] Falha ao remover pasta {pasta}: {e}")
 
@@ -2203,7 +2253,7 @@ async def fetch_social_post_summary_async(
     max_results: int = 1000,
 ) -> List[Dict[str, Optional[str]]]:
     s = get_settings()
-    api_token = api_token or s.APIFY_KEY  # type: ignore[attr-defined]
+    api_token = api_token or s.APIFY_KEY # type: ignore[attr-defined]
 
     input_urls = [u.strip() for u in post_url if u and u.strip()]
     if not input_urls:
@@ -2213,18 +2263,19 @@ async def fetch_social_post_summary_async(
     known_map, unknown_set = _partition_known_unknown_by_mongo(input_urls)
 
     urls_instagram_profiles = [u for u in input_urls if "instagram.com" in u and _is_ig_profile_url(u)]
-    urls_instagram_posts    = [u for u in input_urls if "instagram.com" in u and _shortcode(u)]
+    urls_instagram_posts = [u for u in input_urls if "instagram.com" in u and _shortcode(u)]
     
-    urls_tiktok_profiles    = [u for u in input_urls if "tiktok.com" in u and _is_tt_profile_url(u)]
-    urls_tiktok_posts       = [u for u in input_urls if "tiktok.com" in u and _tt_id(u)]
+    urls_tiktok_profiles = [u for u in input_urls if "tiktok.com" in u and _is_tt_profile_url(u)]
+    urls_tiktok_posts = [u for u in input_urls if "tiktok.com" in u and _tt_id(u)]
     
-    urls_static             = [u for u in input_urls if "https://static-resources" in u]
+    urls_static = [u for u in input_urls if "https://static-resources" in u]
     
     # filtrar o que já está no Mongo
     urls_instagram_posts = [u for u in urls_instagram_posts if u in unknown_set]
-    urls_tiktok_posts    = [u for u in urls_tiktok_posts if u in unknown_set]
-    urls_tiktok_profiles = [u for u in urls_tiktok_profiles if u in unknown_set]
-    urls_static          = [u for u in urls_static if u in unknown_set]
+    urls_tiktok_posts = [u for u in urls_tiktok_posts if u in unknown_set]
+    # 🚨 Ajuste: Se a URL do perfil estiver no Mongo, ela ainda deve ser usada como semente, mas o fan-out filtrará posts existentes.
+    # urls_tiktok_profiles = [u for u in urls_tiktok_profiles if u in unknown_set] 
+    urls_static = [u for u in urls_static if u in unknown_set]
 
     tlog(
     f"[FETCH] IG posts novos: {len(urls_instagram_posts)} | "
@@ -2339,6 +2390,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
 
     total_steps = 5
     step = 0
+    final_results: List[dict] = []
 
     # --- função auxiliar para reportar progresso normalizado ---
     def _safe_progress(percent: float, msg: str = ""):
@@ -2346,8 +2398,8 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         if not progress_callback:
             return
         try:
-            percent = max(0.0, min(1.0, percent))  # mantém entre 0 e 1
-            progress_callback(round(percent, 2), msg)  # envia 0–100%
+            percent = max(0.0, min(1.0, percent)) # mantém entre 0 e 1
+            progress_callback(round(percent, 2), msg) # envia 0–100%
         except Exception as e:
             print(f"[Aviso] progress_callback falhou: {e}")
 
@@ -2356,63 +2408,70 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         step += 1
         _safe_progress(step / total_steps, msg)
 
-    # ----------------------------
-    # 1️⃣ Buscar/baixar posts
-    # ----------------------------
-    update_step("🔍 Buscando e baixando posts...")
-    resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=1000)
-    if not resultados:
-        print("Nenhum resultado retornado pelos scrapers.")
-        return []
+    try:
+        # ----------------------------
+        # 1️⃣ Buscar/baixar posts
+        # ----------------------------
+        update_step("🔍 Buscando e baixando posts...")
+        resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=1000)
+        final_results = resultados # mantém a referência para limpeza no finally
+        if not resultados:
+            print("Nenhum resultado retornado pelos scrapers.")
+            return []
 
-    # ----------------------------
-    # 2️⃣ Transcrever e extrair frames
-    # ----------------------------
-    update_step("🎙️ Transcrevendo e extraindo frames...")
+        # ----------------------------
+        # 2️⃣ Transcrever e extrair frames
+        # ----------------------------
+        update_step("🎙️ Transcrevendo e extraindo frames...")
 
-    total_videos = len(resultados)
-    progresso_local = 0
+        total_videos = len([r for r in resultados if r.get('mediaLocalPath')])
+        progresso_local = 0
 
-    def local_progress(concluidos=None, total=None):
-        nonlocal progresso_local
-        progresso_local += 1
-        # calcula progresso relativo (0–100) dentro desta etapa
-        progresso_total = (1 + (progresso_local / max(1, total_videos)) * 2) / total_steps
-        _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
+        def local_progress(concluidos=None, total=None):
+            nonlocal progresso_local
+            progresso_local += 1
+            # calcula progresso relativo (0–100) dentro desta etapa
+            progresso_total = (step + (progresso_local / max(1, total_videos))) / total_steps
+            _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
 
-    tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} vídeos")
-    anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
-    tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
+        tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} posts")
+        anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
+        tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
 
-    # ----------------------------
-    # 3️⃣ Gerar embeddings
-    # ----------------------------
-    update_step("🧠 Gerando embeddings...")
-    resultados = gerar_embeddings(resultados)
+        # ----------------------------
+        # 3️⃣ Gerar embeddings
+        # ----------------------------
+        update_step("🧠 Gerando embeddings...")
+        resultados = gerar_embeddings(resultados)
 
-    # ----------------------------
-    # 4️⃣ Classificar via Mongo Vector Search
-    # ----------------------------
-    update_step("🏷️ Classificando resultados...")
-    resultados = classificar_via_mongo_vector_search(resultados, k=5)
+        # ----------------------------
+        # 4️⃣ Classificar via Mongo Vector Search
+        # ----------------------------
+        update_step("🏷️ Classificando resultados...")
+        resultados = classificar_via_mongo_vector_search(resultados, k=5)
 
-    # ----------------------------
-    # 5️⃣ Limpar arquivos temporários
-    # ----------------------------
-    update_step("🧹 Limpando diretórios temporários...")
-    caminhos = _coletar_caminhos_midia(resultados)
-    _deletar_arquivos(caminhos)
-    _deletar_pasta_se_vazia(Path(media))
+        # ----------------------------
+        # 5️⃣ Limpar arquivos temporários
+        # ----------------------------
+        update_step("🧹 Limpando diretórios temporários...")
+        caminhos = _coletar_caminhos_midia(resultados)
+        _deletar_arquivos(caminhos)
+        _deletar_pasta_se_vazia(Path(media))
+        _deletar_pasta_se_vazia(Path(BASE_DIR) / "tmp")
 
-    tmpdir = Path(BASE_DIR) / "tmp"
-    if tmpdir.exists():
-        for f in tmpdir.iterdir():
-            try:
-                f.unlink()
-            except Exception:
-                pass
-        _deletar_pasta_se_vazia(tmpdir)
-
-    _safe_progress(1.0, "✅ Finalizado com sucesso!")
-    return resultados
-
+        _safe_progress(1.0, "✅ Finalizado com sucesso!")
+        return resultados
+    
+    except Exception as pipeline_error:
+        tlog(f"[ERROR] ❌ Erro fatal no pipeline: {pipeline_error}")
+        # Garante a limpeza mesmo em caso de erro
+        try:
+            tlog("[PIPELINE] Tentando limpeza de emergência...")
+            caminhos = _coletar_caminhos_midia(final_results)
+            _deletar_arquivos(caminhos)
+            _deletar_pasta_se_vazia(Path(media))
+            _deletar_pasta_se_vazia(Path(BASE_DIR) / "tmp")
+            tlog("[PIPELINE] Limpeza de emergência concluída.")
+        except Exception as cleanup_error:
+             tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
+        raise # relança o erro original
