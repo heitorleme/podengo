@@ -2183,10 +2183,6 @@ def _inferir_categoria_knn(vizinhos):
     scores = np.array([v.get("score", 0) for v in vizinhos], dtype=float)
 
     def ponderar(valores, distancias, epsilon: float = 1e-9):
-        """
-        Calcula pesos normalizados proporcionalmente à proximidade (1 / distância).
-        Evita divisões por zero e problemas de tipo com arrays.
-        """
         if (
             valores is None
             or len(valores) == 0
@@ -2195,28 +2191,40 @@ def _inferir_categoria_knn(vizinhos):
             or len(valores) != len(distancias)
         ):
             return None, {}
-
-        dist = np.array(distancias, dtype=float)
-
-        # substitui distâncias inválidas (0, NaN, inf)
+    
+        raw = np.array(distancias, dtype=float)
+    
+        # --------- DETECÇÃO AUTOMÁTICA ---------
+        # Se os scores estão entre 0 e 1 → são similaridades
+        if np.all((raw >= 0) & (raw <= 1)):
+            dist = 1.0 - raw
+        else:
+            dist = raw
+    
+        # substitui distâncias inválidas
         dist[~np.isfinite(dist)] = 1.0
-
-        # evita divisão por zero
-        inv_dist = 1.0 / (dist + epsilon)
-
-        # normaliza pesos para somarem 1
+    
+        # distância zero → peso enorme → evitamos
+        dist = dist + epsilon
+    
+        # proximidade = 1/distância
+        inv_dist = 1.0 / dist
+    
+        # pesos normalizados
         pesos_norm = inv_dist / inv_dist.sum()
-
+    
+        # soma pesos por categoria
         pesos_dict = {}
         for val, peso in zip(valores, pesos_norm):
             if val:
                 pesos_dict[val] = pesos_dict.get(val, 0.0) + float(peso)
-
+    
         if not pesos_dict:
             return None, {}
-
+    
         proporcoes = {k: round(v * 100, 1) for k, v in pesos_dict.items()}
         valor_predito = max(proporcoes, key=proporcoes.get)
+    
         return valor_predito, proporcoes
 
     comunidade_predita, comunidades_prop = ponderar(comunidades, scores)
@@ -2263,7 +2271,7 @@ def _buscar_vizinhos_mongo_wrapper(embedding, k=5):
         print(f"[CLUSTER] Erro em _buscar_vizinhos_mongo_wrapper: {e}")
         return []
 
-def classificar_via_mongo_vector_search(resultados, k=5, max_workers=12):
+def classificar_via_mongo_vector_search(resultados, k=5, max_workers=max_workers):
     """
     Classifica cada item via MongoDB Atlas Vector Search (sem cache),
     garantindo segurança de tipos e compatibilidade com numpy arrays.
@@ -2602,6 +2610,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
