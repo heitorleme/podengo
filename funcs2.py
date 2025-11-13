@@ -2003,29 +2003,41 @@ def anexar_transcricoes_threaded(
                     tlog(f"[CALLBACK] ⚠️ erro no callback: {e}")
 
     # ==========================================================
-    # 🔹 Garantia de estrutura após o processamento
+    # 🔹 Garantia de estrutura após processamento
     # ==========================================================
-    # --- PATCH: limpar itens None ou inválidos gerados durante threads ---
-    for i, item in enumerate(resultados):
-        if item is None or not isinstance(item, dict):
-            tlog(f"[ERRO] resultados[{i}] tornou-se inválido (None ou não-dict) após threads. Substituindo por dicionário vazio.")
-            resultados[i] = {}
+    for i in range(len(resultados)):
+        item = resultados[i]
     
-    for item in resultados:
+        # Se o item não é dict, cria um dict mínimo e pula normalização interna
+        if not isinstance(item, dict):
+            tlog(f"[ERRO] resultados[{i}] inválido (None ou não-dict). Normalizando para estrutura mínima.")
+            resultados[i] = {
+                "transcricao": None,
+                "framesDescricao": None,
+                "transcricao_erro": "item_invalido",
+                "ai_model_data": {},
+                "base64Frames": [],
+            }
+            continue
+    
+        # Normalização para itens válidos
+        item.setdefault("transcricao", None)
+        item.setdefault("framesDescricao", None)
+        item.setdefault("transcricao_erro", None)
+        item.setdefault("base64Frames", [])
         amd = item.setdefault("ai_model_data", {})
+    
         amd.setdefault("ai_model", "gpt-5-nano")
         amd.setdefault("input_tokens", None)
         amd.setdefault("output_tokens", None)
         amd.setdefault("audio_seconds", None)
         amd.setdefault("num_images", 0)
         amd.setdefault("estimated_image_tokens", 0)
-
-        # força base64Frames como lista vazia
-        item.setdefault("base64Frames", [])
-        if isinstance(item["base64Frames"], list) and item["base64Frames"]:
-            tlog(f"[WARN] Limpando base64Frames acidentalmente preenchido")
+    
+        # Força base64Frames como lista vazia
+        if not isinstance(item["base64Frames"], list):
             item["base64Frames"] = []
-
+    
     return resultados
 
 def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[dict]:
@@ -2582,6 +2594,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
