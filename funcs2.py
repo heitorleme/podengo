@@ -1965,6 +1965,11 @@ def anexar_transcricoes_threaded(
                 erro,
             ) = fut.result()
 
+            # 🔒 SLAM DUNK PROTECTION: impede que idx inválido cause NoneType
+            if idx is None or idx < 0 or idx >= len(resultados) or resultados[idx] is None:
+                tlog(f"[ERRO] Worker retornou idx inválido ou item None: idx={idx}")
+                continue
+
             # ----------------------------
             # preencher resultados[idx]
             # ----------------------------
@@ -2577,6 +2582,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
