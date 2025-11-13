@@ -3,19 +3,22 @@ import time
 from contextlib import redirect_stdout, redirect_stderr
 from importlib import import_module
 from urllib.parse import urlparse
+from datetime import datetime
 import streamlit as st
-from main import main  # importa sua função principal
+
+from main import main   # sua função principal
 
 # ----------------------------
-# Configurações de domínios válidos
+# Configurações
 # ----------------------------
 VALID_DOMAINS = {
     "instagram.com", "www.instagram.com", "m.instagram.com",
-    "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com", "static-resources"
+    "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
+    "vt.tiktok.com", "static-resources"
 }
 
 # ----------------------------
-# Funções auxiliares de URL
+# Helpers de URL
 # ----------------------------
 def is_supported_url(u: str) -> bool:
     try:
@@ -31,12 +34,10 @@ def is_supported_url(u: str) -> bool:
     except Exception:
         return False
 
-
 def normalize_url(u: str) -> str:
     if not u:
         return ""
     return u if u.startswith(("http://", "https://")) else "https://" + u.strip()
-
 
 def parse_urls(raw_text: str):
     lines = [normalize_url(line.strip()) for line in (raw_text or "").splitlines()]
@@ -49,170 +50,183 @@ def parse_urls(raw_text: str):
 
 
 # ----------------------------
-# Interface Streamlit
+# Session state seguro
+# ----------------------------
+if "running" not in st.session_state:
+    st.session_state.running = False
+
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+if "stdout" not in st.session_state:
+    st.session_state.stdout = ""
+
+if "stderr" not in st.session_state:
+    st.session_state.stderr = ""
+
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
+
+if "progress_ratio" not in st.session_state:
+    st.session_state.progress_ratio = 0.0
+
+if "progress_message" not in st.session_state:
+    st.session_state.progress_message = "---"
+
+
+# ----------------------------
+# Layout principal
 # ----------------------------
 st.set_page_config(page_title="Fetcher IG/TikTok", page_icon="🔗", layout="centered")
 st.title("🔗 Processar publicações do Instagram e TikTok")
-st.caption("Cole **uma URL por linha** ou envie um arquivo `.txt`. Geraremos um arquivo Excel (.xlsx) para download.")
+
+st.caption(
+    "Cole **uma URL por linha** ou envie um arquivo `.txt`. "
+    "Geraremos um arquivo Excel (.xlsx) para download."
+)
 
 with st.expander("Como usar", expanded=False):
-    st.markdown(
-        "- Cole **uma URL por linha**.\n"
-        "- Suportados: **instagram.com**, **tiktok.com** (inclui `vm.tiktok.com`).\n"
-        "- Ao finalizar, um **arquivo Excel (.xlsx)** é disponibilizado para download."
-    )
+    st.markdown("""
+    - Cole **uma URL por linha**.  
+    - Suportados: **instagram.com**, **tiktok.com** (inclusive encurtadores).  
+    - Ao finalizar, um **arquivo Excel (.xlsx)** será disponibilizado.
+    """)
 
+# Inputs
 col1, col2 = st.columns(2, vertical_alignment="top")
-
 with col1:
     raw = st.text_area(
-        "Cole aqui (uma URL por linha):",
+        "Cole aqui:",
         height=180,
-        placeholder="https://www.instagram.com/p/...\nhttps://www.tiktok.com/@user/video/...\nhttps://vm.tiktok.com/...",
+        placeholder="https://www.instagram.com/p/...\nhttps://www.tiktok.com/@user/video/..."
     )
-
 with col2:
-    uploaded = st.file_uploader("Ou envie um .txt com URLs", type=["txt"])
-    if uploaded is not None:
-        try:
-            txt = uploaded.read().decode("utf-8", errors="ignore")
-            raw = (raw + "\n" + txt) if raw else txt
-        except Exception as e:
-            st.error(f"Erro ao ler o arquivo: {e}")
+    uploaded = st.file_uploader("Ou envie um arquivo .txt", type=["txt"])
+    if uploaded:
+        txt = uploaded.read().decode("utf-8", errors="ignore")
+        raw = (raw + "\n" + txt) if raw else txt
 
 urls = parse_urls(raw or "")
 
-# ----------------------------
-# Feedback de URLs
-# ----------------------------
 if raw:
     st.write("### URLs detectadas")
     if urls:
-        st.success(f"{len(urls)} URL(s) válida(s).")
-        with st.expander("Ver URLs válidas", expanded=False):
+        st.success(f"{len(urls)} URL(s) válidas.")
+        with st.expander("Ver URLs", expanded=False):
             st.text("\n".join(urls))
     else:
-        st.warning("Nenhuma URL válida detectada.")
+        st.warning("Nenhuma URL válida na sua lista.")
 
 st.divider()
 
 # ----------------------------
-# Execução do pipeline com barra de progresso
+# Botão para iniciar pipeline
 # ----------------------------
-if st.button("▶️ Executar pipeline e gerar Excel (.xlsx)", type="primary", disabled=not urls):
-    out_buf, err_buf = io.StringIO(), io.StringIO()
+if st.button("▶️ Executar pipeline e gerar Excel", disabled=not urls, type="primary"):
+    st.session_state.running = True
+    st.session_state.result = None
+    st.session_state.stdout = ""
+    st.session_state.stderr = ""
+    st.session_state.progress_ratio = 0.0
+    st.session_state.progress_message = "---"
+    st.session_state.start_time = time.time()
+    st.rerun()
+
+
+# ============================================================
+#                EXECUÇÃO DO PIPELINE (SEGURO)
+# ============================================================
+if st.session_state.running:
+
+    st.info("⏳ Pipeline iniciado. Não feche a página.")
+
+    # Elementos da barra de progresso
     progress_bar = st.progress(0)
     progress_text = st.empty()
+    eta_text = st.empty()
 
+    # buffer logs
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+
+    # --------------------------------------
+    # CALLBACK: Atualiza barra + ETA
+    # --------------------------------------
     def update_progress(ratio, message):
-        """Callback chamado pelo main/rodar_pipeline."""
-        percent = int(ratio * 100)
+        st.session_state.progress_ratio = max(0.0, min(1.0, float(ratio)))
+        st.session_state.progress_message = message
+
+        # Atualiza UI
+        percent = int(st.session_state.progress_ratio * 100)
         progress_bar.progress(percent)
-        progress_text.text(message)
+        progress_text.write(f"**{percent}% — {message}**")
 
-    try:
-        mod = import_module("main")
-        if not hasattr(mod, "main"):
-            st.error("`main.py` não contém uma função `main`.")
-        else:
-            fn = getattr(mod, "main")
-
-            with redirect_stdout(out_buf), redirect_stderr(err_buf):
-                with st.spinner("Executando pipeline..."):
-                    result = fn(urls, progress_callback=update_progress)
-
-            # garante barra completa no final
-            progress_bar.progress(100)
-            progress_text.text("✅ Execução concluída!")
-
-            stdout_txt = out_buf.getvalue().strip()
-            stderr_txt = err_buf.getvalue().strip()
-
-            # ----------------------------
-            # Saída estruturada em JSON
-            # ----------------------------
-            st.subheader("📦 Resultados estruturados")
-
-            structured_data = []
-            if result and isinstance(result, dict):
-                # ✅ Se o main retornou um DataFrame, usa ele para mostrar os resultados
-                if "df" in result and hasattr(result["df"], "to_dict"):
-                    try:
-                        structured_data = result["df"].to_dict(orient="records")
-                    except Exception as e:
-                        st.warning(f"Não foi possível converter o DataFrame: {e}")
-                        structured_data = []
-                else:
-                    # tenta pegar possíveis saídas por URL
-                    for u in urls:
-                        structured_data.append({
-                            "url": u,
-                            "resultado": result.get("outputs", {}).get(u, "sem saída"),
-                            "embedding": result.get("embeddings", {}).get(u, []),
-                        })
-            else:
-                # fallback: tenta parsear stdout como JSON
-                import json
-                try:
-                    parsed = json.loads(stdout_txt)
-                    if isinstance(parsed, list):
-                        structured_data = parsed
-                    elif isinstance(parsed, dict):
-                        structured_data = [parsed]
-                except Exception:
-                    structured_data = [{"raw_output": stdout_txt or "(sem saída)"}]
-
-            with st.expander("📄 Visualizar estrutura JSON", expanded=False):
-                st.json(structured_data)
-
-            # ----------------------------
-            # 🪵 Visualização dos TLOGs
-            # ----------------------------
-            if stdout_txt:
-                with st.expander("🪵 Logs de execução (tlogs)", expanded=False):
-                    st.code(stdout_txt, language="bash")
-
-            # ----------------------------
-            # Erros / alertas
-            # ----------------------------
-            if stderr_txt:
-                with st.expander("⚠️ Erros/alertas (stderr)", expanded=False):
-                    st.code(stderr_txt)
-
-            # ----------------------------
-            # Download XLSX
-            # ----------------------------
-            if result and "xlsx_bytes" in result and "xlsx_name" in result:
-                st.success("✅ Execução concluída. Baixe o arquivo Excel abaixo.")
-                st.download_button(
-                    label="⬇️ Baixar Excel (.xlsx)",
-                    data=result["xlsx_bytes"],
-                    file_name=result["xlsx_name"],
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True,
+        # Estimar ETA
+        elapsed = time.time() - st.session_state.start_time
+        if ratio > 0:
+            total_est = elapsed / ratio
+            remaining = total_est - elapsed
+            if remaining > 0:
+                eta_text.write(
+                    f"⏱️ Tempo restante estimado: **{int(remaining//60)} min {int(remaining%60)} s**"
                 )
 
-            # Resumo
-            st.caption(
-                f"Processadas {result.get('n_urls', 0)} URL(s). "
-                f"Itens enviados ao Mongo: {result.get('n_items_upload', 0)}."
-            )
+    # --------------------------------------
+    # Execução
+    # --------------------------------------
+    try:
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            result = main(urls, progress_callback=update_progress)
 
-    except ModuleNotFoundError:
-        st.error("Arquivo `main.py` não encontrado na pasta atual.")
+        # Finalização
+        st.session_state.result = result
+        st.session_state.stdout = out_buf.getvalue()
+        st.session_state.stderr = err_buf.getvalue()
+        st.session_state.running = False
+        st.rerun()
+
     except Exception as e:
-        st.error(f"Falha ao executar: {e}")
-        stdout_txt = out_buf.getvalue().strip()
-        stderr_txt = err_buf.getvalue().strip()
-        if stdout_txt:
-            with st.expander("📄 Saída (stdout)"):
-                st.code(stdout_txt)
-        if stderr_txt:
-            with st.expander("⚠️ Erros/alertas (stderr)"):
-                st.code(stderr_txt)
+        st.session_state.stderr = f"[FATAL] {e}"
+        st.session_state.running = False
+        st.rerun()
 
-    # limpeza da barra e texto após conclusão
-    time.sleep(0.5)
-    progress_bar.empty()
-    progress_text.empty()
+
+# ============================================================
+#                   EXIBIÇÃO DOS RESULTADOS
+# ============================================================
+if st.session_state.result:
+
+    result = st.session_state.result
+    st.success("🎉 Pipeline concluído!")
+
+    # DOWNLOAD EXCEL
+    if "xlsx_bytes" in result:
+        st.download_button(
+            label="⬇️ Baixar Excel (.xlsx)",
+            data=result["xlsx_bytes"],
+            file_name=result["xlsx_name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+
+    # JSON result
+    st.subheader("📄 Dados estruturados")
+    with st.expander("Ver JSON completo", expanded=False):
+        if "df" in result:
+            st.json(result["df"].to_dict(orient="records"))
+        else:
+            st.json(result)
+
+    # LOGS
+    if st.session_state.stdout:
+        with st.expander("🪵 Logs (stdout)"):
+            st.code(st.session_state.stdout)
+
+    if st.session_state.stderr:
+        with st.expander("⚠️ Erros/Alertas (stderr)"):
+            st.code(st.session_state.stderr)
+
+    st.caption(
+        f"Processadas {result.get('n_urls', 0)} URL(s). "
+        f"Itens enviados ao Mongo: {result.get('n_items_upload', 0)}."
+    )
