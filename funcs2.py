@@ -1861,7 +1861,7 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: None):
 
 def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
-    max_workers: int = max_workers,
+    max_workers: int = 1,
     gpu_singleton: bool = False,
     callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[Dict[str, Any]]:
@@ -2577,6 +2577,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
