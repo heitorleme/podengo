@@ -2003,7 +2003,7 @@ def anexar_transcricoes_threaded(
     # --- PATCH: limpar itens None ou inválidos gerados durante threads ---
     for i, item in enumerate(resultados):
         if item is None or not isinstance(item, dict):
-            tlog(f"[ERRO] resultados[{i}] tornou-se inválido (None ou não-dict) após threads. Substituindo por {}.")
+            tlog(f"[ERRO] resultados[{i}] tornou-se inválido (None ou não-dict) após threads. Substituindo por dicionário vazio.")
             resultados[i] = {}
     
     for item in resultados:
@@ -2577,6 +2577,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
