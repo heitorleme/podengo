@@ -101,7 +101,9 @@ def _sanitize_items(resultados):
         item = {k: v for k, v in r.items() if k not in campos_excluir}
         itens_sanitizados.append(item)
 
-        if "transcricao_erro" not in r:
+        erro = r.get("transcricao_erro")
+
+        if not erro:  # None, "", False → OK para upload
             item_para_upload = {
                 k: r.get(k)
                 for k in [
@@ -127,10 +129,11 @@ def _sanitize_items(resultados):
                     "comunidades_proporcoes",
                 ]
             }
-
             item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
             item_para_upload["upload_timestamp"] = datetime.now()
             itens_para_upload.append(item_para_upload)
+        else:
+            print(f"[UPLOAD] Ignorando item com erro: {erro!r}")
 
         # Impressão JSON (debug)
         try:
@@ -245,3 +248,4 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
