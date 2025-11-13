@@ -1879,6 +1879,12 @@ def anexar_transcricoes_threaded(
     if not resultados:
         return resultados
 
+    # Garantir que todos os itens são dicts válidos
+    for i, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            tlog(f"[ERRO] resultados[{i}] não é dict dentro do worker. Substituindo por dict vazio.")
+            resultados[i] = {}
+
     # Semáforo removido
     sem = None
 
@@ -1994,8 +2000,13 @@ def anexar_transcricoes_threaded(
     # ==========================================================
     # 🔹 Garantia de estrutura após o processamento
     # ==========================================================
+    # --- PATCH: limpar itens None ou inválidos gerados durante threads ---
+    for i, item in enumerate(resultados):
+        if item is None or not isinstance(item, dict):
+            tlog(f"[ERRO] resultados[{i}] tornou-se inválido (None ou não-dict) após threads. Substituindo por {}.")
+            resultados[i] = {}
+    
     for item in resultados:
-
         amd = item.setdefault("ai_model_data", {})
         amd.setdefault("ai_model", "gpt-5-nano")
         amd.setdefault("input_tokens", None)
@@ -2519,6 +2530,16 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
         tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
 
+        # --- FILTRO CRÍTICO APÓS A TRANSCRIÇÃO ---
+        # Em alguns casos, uma thread pode retornar None e sobrescrever um item da lista.
+        # Isso evita que gerar_embeddings() ou classificar_via_mongo_vector_search() quebrem.
+        posts_iniciais = len(resultados)
+        resultados = [r for r in resultados if isinstance(r, dict)]
+        filtrados = posts_iniciais - len(resultados)
+        if filtrados > 0:
+            tlog(f"[WARN] Removidos {filtrados} itens inválidos (None ou não-dict) após transcrição.")
+
+
         # ----------------------------
         # 3️⃣ Gerar embeddings
         # ----------------------------
@@ -2556,5 +2577,6 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
