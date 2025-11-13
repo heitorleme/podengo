@@ -2494,6 +2494,9 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         # ----------------------------
         update_step("🎙️ Transcrevendo e extraindo frames...")
 
+        # FILTRO CRÍTICO (impede 'NoneType' mais tarde)
+        resultados = [r for r in resultados if isinstance(r, dict)]
+
         total_videos = len([r for r in resultados if r.get('mediaLocalPath')])
         progresso_local = 0
 
@@ -2505,12 +2508,14 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
             _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
 
         tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} posts")
-        print("Checando resultados malformados...")
+        tlog("Checando resultados malformados...")
         for i, r in enumerate(resultados):
             if r is None:
-                print(f"[ERRO] resultados[{i}] == None")
+                tlog(f"[ERRO] resultados[{i}] == None")
             elif not isinstance(r, dict):
-                print(f"[ERRO] resultados[{i}] NÃO É dict: {type(r)}")
+                tlog(f"[ERRO] resultados[{i}] NÃO É dict: {type(r)}")
+
+        
         anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
         tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
 
@@ -2551,4 +2556,5 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
