@@ -389,7 +389,7 @@ def _build_atempo_chain(speed: float) -> str:
 
 def _run_ffmpeg(cmd_args: list):
     proc = subprocess.run(
-        cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=90
     )
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="ignore")
@@ -485,69 +485,110 @@ def _audio_temp_speed_from_video_ffmpeg(
     speed: float = 2.0,
     sample_rate: int = 16000,
     mono: bool = True,
+    timeout: int = 120,
 ) -> Tuple[str, str]:
     """
     Extrai o áudio do vídeo (ajustando velocidade) para um diretório temporário persistente.
     Retorna (tmpdir, caminho_wav).
+
+    Correções:
+    - Gera arquivo WAV único por job (UUID), evitando corrida entre workers.
+    - Timeout aplicado ao ffmpeg (impede travamento).
+    - Remove caching de WAV (inseguro com múltiplos workers simultâneos).
     """
+    import tempfile
+    from uuid import uuid4
+
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Arquivo não encontrado: {video_path}")
 
-    # 🔹 Usa diretório temporário persistente em vez de TemporaryDirectory()
+    # 🔹 Diretório temporário persistente
     tmpdir = Path(BASE_DIR) / "tmp"
     tmpdir.mkdir(exist_ok=True)
 
-    # Nome de saída único baseado no hash do vídeo
-    hash_part = hashlib.sha1(video_path.encode("utf-8")).hexdigest()[:10]
-    out_wav = tmpdir / f"audio_{hash_part}_{speed}x.wav"
+    # 🔹 WAV único por job, evitando conflitos entre workers
+    wav_name = f"audio_{uuid4().hex}_{speed}x.wav"
+    out_wav = tmpdir / wav_name
 
-    # Se já existir e for recente, reutiliza (opcional)
-    # A reutilização é boa, mas exige a limpeza final no pipeline completo
-    if out_wav.exists() and out_wav.stat().st_size > 0:
-        return str(tmpdir), str(out_wav)
-
+    # 🔹 Cadeia de filtros (ffmpeg só aceita atempo até 2x por filtro)
     atempo_chain = _build_atempo_chain(speed)
+
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", video_path, "-vn",
         "-filter:a", atempo_chain,
         "-ar", str(sample_rate),
     ]
+
     if mono:
         cmd += ["-ac", "1"]
+
     cmd += [str(out_wav)]
 
-    _run_ffmpeg(cmd)
+    # 🔹 Executa ffmpeg com timeout
+    try:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg excedeu timeout de {timeout}s")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg falhou: {e.stderr.decode(errors='ignore')}")
+
     return str(tmpdir), str(out_wav)
 
 def transcrever_video_em_speed(
-    video_path: str, speed: float = 2.0, sample_rate: int = 16000,
+    video_path: str,
+    speed: float = 2.0,
+    sample_rate: int = 16000,
+    ffmpeg_timeout: int = 120,
 ) -> Tuple[str, Optional[float]]:
     """
-    Transcreve o áudio de um vídeo e, em seguida, remove o arquivo WAV temporário IMEDIATAMENTE.
+    Transcreve o áudio de um vídeo aplicando speed-up e extração de WAV.
+    Inclui:
+    - timeout no ffmpeg
+    - limpeza imediata do WAV
+    - retorno seguro de erros
     """
+    # Extração de áudio — AGORA COM TIMEOUT
     tmpdir, wav_path = _audio_temp_speed_from_video_ffmpeg(
-        video_path, speed=speed, sample_rate=sample_rate
+        video_path,
+        speed=speed,
+        sample_rate=sample_rate,
+        timeout=ffmpeg_timeout
     )
+
     dur_s = None
     texto = ""
 
-    # 🚨 Ajuste: Envolve o uso do WAV em um bloco try-finally para garantir a limpeza imediata.
     try:
+        # Obtém duração (não usa ffmpeg, então ok sem timeout)
         dur_s = _ffprobe_duration_seconds(wav_path)
+
+        # Chamada ao modelo de transcrição
         resp = AudioModel().transcribe(wav_path)
-        texto = resp.get("text", "") if isinstance(resp, dict) else (resp or "")
+
+        if isinstance(resp, dict):
+            texto = resp.get("text", "") or ""
+        else:
+            texto = resp or ""
+
         return texto, dur_s
+
     except Exception as e:
-        return f"[Erro transcrição] {e}", dur_s # Retorna o erro como o texto
+        return f"[Erro transcrição] {e}", dur_s
+
     finally:
-        # Limpeza Imediata: Remove o arquivo WAV logo após a transcrição
+        # Limpeza do WAV gerado
         try:
             Path(wav_path).unlink(missing_ok=True)
             tlog(f"[LIMPEZA ÁUDIO] 🗑️ {Path(wav_path).name} removido após transcrição")
         except Exception as e:
             tlog(f"[WARN] falha ao remover áudio temporário {Path(wav_path).name}: {e}")
-
 
 def _ffprobe_duration_seconds(path: str) -> Optional[float]:
     try:
@@ -1502,6 +1543,9 @@ def _merge_results_in_input_order(
     fetched_by_norm_url: Dict[str, dict] = {}
     by_profile: Dict[str, List[dict]] = {}
 
+     # 🔒 Garantir que não existem itens None ou não-dicts
+    fetched_new_items = [it for it in (fetched_new_items or []) if isinstance(it, dict)]
+
     def _cand_urls(it: dict) -> List[str]:
         cand = []
         for k in ("url", "inputUrl", "webVideoUrl", "shareUrl"):
@@ -1670,15 +1714,19 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
 # ─────────────────────────────────────────────────────────────
 # Transcrição em paralelo (threads) + descrição de frames
 # ─────────────────────────────────────────────────────────────
-def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore):
+def _thread_worker(idx: int, media_url: Optional[str], sem: None):
     """
-    Transcreve vídeo/imagem e gera descrição de frames em paralelo.
+    Worker de processamento de vídeo/imagem:
+      - Baixa a mídia para um caminho único TEMPORÁRIO por job (evita corrida)
+      - Transcreve áudio (com timeout dentro de transcrever_video_em_speed)
+      - Extrai frames
+      - Descreve frames
+      - Remove o arquivo local no final (sem conflito entre threads)
 
     Retorna:
-      (idx, transcricao:str|None, base64Frames:list[str], framesDescricao:str|None,
-       ai_model_data:dict, erro:str|None)
+      (idx, transcricao:str|None, base64Frames:list[str],
+       framesDescricao:str|None, ai_model_data:dict, erro:str|None)
     """
-
     ai_model_data = {
         "ai_model": "gpt-5-nano",
         "input_tokens": None,
@@ -1687,90 +1735,82 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
         "num_images": 0,
         "estimated_image_tokens": 0,
     }
-    local_path: Path = Path() # Inicializado para o bloco finally
+
+    local_path = Path()  # definido aqui para o finally
 
     if not media_url:
         return idx, None, [], None, ai_model_data, "sem_media_url"
 
     try:
-        base_dir = Path(media)
+        # ---------------------------------------------------------------------
+        # 🔹 Caminho TEMPORÁRIO único por job (correto; sem corrida entre threads)
+        # ---------------------------------------------------------------------
+        from uuid import uuid4
+        import tempfile
 
-        def _is_url(s: str) -> bool:
-            return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
+        suffix = Path(media_url).suffix or ".mp4"
+        fd, tmpname = tempfile.mkstemp(prefix=f"job_{uuid4().hex}_", suffix=suffix)
+        os.close(fd)
+        local_path = Path(tmpname)
 
-        def _resolve_local_path(s: str) -> Path:
-            # 🚨 Ajuste na resolução de caminho: Prioriza sempre caminhos absolutos existentes
-            p_s = Path(s)
-            if p_s.is_absolute() and p_s.exists():
-                return p_s
-            
-            if _is_url(s):
-                name = unquote(os.path.basename(urlsplit(s).path)) or "mediafile"
-            else:
-                name = s
-            p = Path(name)
-            return p if p.is_absolute() else (base_dir / name)
+        # ---------------------------------------------------------------------
+        # 🔹 Baixar a mídia (se for URL)
+        # ---------------------------------------------------------------------
+        if media_url.startswith("http://") or media_url.startswith("https://"):
+            try:
+                resp = requests.get(media_url, timeout=30)
+                resp.raise_for_status()
+                local_path.write_bytes(resp.content)
+            except Exception as e:
+                return idx, None, [], None, ai_model_data, f"DownloadError: {e}"
 
-        local_path = _resolve_local_path(media_url)
-        if not local_path.exists():
-            # Tenta um path local baseado no nome do arquivo (se for só o nome)
-            if not local_path.is_absolute():
-                 local_path = Path(media) / local_path.name
-            if not local_path.exists():
-                return idx, None, [], None, ai_model_data, f"FileNotFoundError: {local_path.name}"
-                
+        # ---------------------------------------------------------------------
+        # 🔹 Se não for URL, copiar o arquivo local para o temp exclusivo
+        # ---------------------------------------------------------------------
+        else:
+            original = Path(media_url)
+            if not original.exists():
+                return idx, None, [], None, ai_model_data, f"FileNotFoundError: {original.name}"
+            local_path.write_bytes(original.read_bytes())
+
+        # ---------------------------------------------------------------------
+        # 🔹 Detecta tipo
+        # ---------------------------------------------------------------------
         ext = local_path.suffix.lower()
         is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
         is_image = ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-        
-        # Se o tipo não for resolvido pela extensão, tenta o guess
+
         if not is_video and not is_image:
             kind = _tipo_midia(str(local_path))
             is_video = (kind == "video")
             is_image = (kind == "image")
 
-        texto: Optional[str] = None
-        base64_frames: List[str] = []
-        frames_descricao: Optional[str] = None
+        texto = None
+        base64_frames = []
+        frames_descricao = None
 
-        # ==========================================================
-        # 🔹 PROCESSAMENTO DE VÍDEO (transcrição + frames em paralelo)
-        # ==========================================================
+        # ---------------------------------------------------------------------
+        # 🔹 PROCESSAMENTO DE VÍDEO
+        # ---------------------------------------------------------------------
         if is_video:
             tlog(f"[TR] 🎙️ idx={idx}: processando vídeo {local_path.name}")
 
-            # Rodamos transcrição (com semáforo) e extração de frames em paralelo
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                
-                # Transcrição (usa semáforo para controle da API, se necessário)
-                def _run_transcribe():
-                    if sem:
-                        sem.acquire()
-                        tlog(f"[TR] ▶️ transcrevendo {local_path.name}")
-                        try:
-                            return transcrever_video_em_speed(str(local_path))
-                        finally:
-                            sem.release()
-                    else:
-                        return transcrever_video_em_speed(str(local_path))
+            texto_resp, dur_s = transcrever_video_em_speed(str(local_path))
+            texto = texto_resp
+            ai_model_data["audio_seconds"] = dur_s
 
-                fut_transcricao = ex.submit(_run_transcribe)
-                fut_frames = ex.submit(get_video_frames, str(local_path))
+            # Frames do vídeo
+            base64_frames = get_video_frames(str(local_path))
 
-                # Obtém resultados
-                texto_resp, dur_s = fut_transcricao.result()
-                texto = texto_resp
-                ai_model_data["audio_seconds"] = dur_s
-
-                base64_frames = fut_frames.result()
-                
-            # 🔸 Descrição dos frames
+            # Descrição dos frames
             if base64_frames:
-                secs = ai_model_data.get("audio_seconds") or 0
+                secs = dur_s or 0
                 dyn_max_imgs = max(3, min(15, int(round(secs / 6)) or 1))
+
                 desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
                     base64_frames, max_imgs=dyn_max_imgs
                 )
+
                 frames_descricao = desc
                 ai_model_data["input_tokens"] = in_tok
                 ai_model_data["output_tokens"] = out_tok
@@ -1779,46 +1819,45 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: threading.Semaphore)
 
             tlog(f"[TR] ✅ idx={idx}: concluído {local_path.name}")
 
-        # ==========================================================
-        # 🔹 PROCESSAMENTO DE IMAGEM ESTÁTICA
-        # ==========================================================
+        # ---------------------------------------------------------------------
+        # 🔹 PROCESSAMENTO DE IMAGEM
+        # ---------------------------------------------------------------------
         elif is_image:
             tlog(f"[TR] 🖼️ idx={idx}: processando imagem {local_path.name}")
-            with open(local_path, "rb") as img:
+
+            with local_path.open("rb") as img:
                 base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
 
             desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
                 base64_frames, max_imgs=1
             )
+
             frames_descricao = desc
             ai_model_data["input_tokens"] = in_tok
             ai_model_data["output_tokens"] = out_tok
             ai_model_data["num_images"] = num_imgs
             ai_model_data["estimated_image_tokens"] = est_img_tokens
+
             tlog(f"[TR] ✅ idx={idx}: concluído {local_path.name}")
 
-        # ==========================================================
+        # ---------------------------------------------------------------------
         # 🔹 RETORNO PADRÃO
-        # ==========================================================
-        # 🚨 Ajuste: Retorna base64_frames APENAS para uso na API (descricao_frames). 
-        # Não será armazenado na memória global 'resultados' (ver anexar_transcricoes_threaded).
+        # ---------------------------------------------------------------------
         return idx, texto, base64_frames, frames_descricao, ai_model_data, None
 
     except Exception as e:
         return idx, None, [], None, ai_model_data, f"{type(e).__name__}: {e}"
 
     finally:
-        # ==========================================================
-        # ♻️ LIMPEZA DE ARQUIVOS TEMPORÁRIOS
-        # ==========================================================
-        # 🚨 Ajuste: Garante a remoção apenas se o arquivo for um dos que criamos na pasta 'media'
-        # ou se for um arquivo que foi baixado (e não um path fora do controle).
-        if local_path.is_file() and str(local_path).startswith(media):
-            try:
+        # ---------------------------------------------------------------------
+        # ♻️ LIMPEZA (segura — arquivo é exclusivo deste job)
+        # ---------------------------------------------------------------------
+        try:
+            if local_path.is_file():
                 local_path.unlink(missing_ok=True)
-                tlog(f"[LIMPEZA] 🗑️ {local_path.name} removido com sucesso")
-            except Exception as e:
-                tlog(f"[WARN] falha ao remover {local_path.name}: {e}")
+                tlog(f"[LIMPEZA] 🗑️ {local_path.name} removido")
+        except Exception as e:
+            tlog(f"[WARN] falha ao remover {local_path.name}: {e}")
 
 def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
@@ -1827,19 +1866,32 @@ def anexar_transcricoes_threaded(
     callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Para cada item com mídia local, transcreve (vídeo) e descreve frames em paralelo.
-    NÃO armazena 'base64Frames' em 'resultados' para evitar estouro de memória.
+    Para cada item com mídia, processa vídeo/imagem em paralelo (ThreadPool).
+    Recursos:
+      - Jobs únicos ✔
+      - Sem semáforo ✔
+      - Sem GPU singleton ✔
+      - Caminhos exclusivos por job (no worker) ✔
+      - Timeout no ffmpeg (no worker) ✔
+      - Nenhum base64Frames armazenado ✔
     """
+
     if not resultados:
         return resultados
 
-    sem = threading.Semaphore(1 if gpu_singleton else max_workers)
+    # Semáforo removido
+    sem = None
 
+    # ==========================================================
+    # 🔹 Criar lista de jobs ÚNICOS (idx, url_midia)
+    # ==========================================================
     jobs: List[Tuple[int, Optional[str]]] = []
+    seen = set()   # evita duplicatas
+
     for idx, item in enumerate(resultados):
         veio_mongo = bool(item.get("_from_mongo"))
 
-        # Garante que SEMPRE exista ai_model_data (mesmo que não processe nada)
+        # garante estrutura do modelo
         item.setdefault("ai_model_data", {
             "ai_model": "gpt-5-nano",
             "input_tokens": None,
@@ -1848,37 +1900,56 @@ def anexar_transcricoes_threaded(
             "num_images": 0,
             "estimated_image_tokens": 0,
         })
-        # Inicializa base64Frames como lista vazia (será mantida assim, pois não armazenamos o conteúdo)
-        item.setdefault("base64Frames", []) 
 
-        # Se já tem transcrição/frames do Mongo, não reprocessa
-        if veio_mongo and (item.get("transcricao") is not None or item.get("framesDescricao") is not None):
+        item.setdefault("base64Frames", [])
+
+        # Se veio do mongo e já tem dados, pula
+        if veio_mongo and (
+            item.get("transcricao") is not None
+            or item.get("framesDescricao") is not None
+        ):
             continue
 
-        url_media = _pick_media_url(
+        # Pega URL/mídia local
+        url_midia = _pick_media_url(
             item.get("mediaUrl"),
             item.get("mediaLocalPath"),
             item.get("mediaLocalPaths"),
         )
-        if url_media:
-            jobs.append((idx, url_media))
+
+        if url_midia:
+            key = (idx, url_midia)
+            if key not in seen:     # EVITA JOB DUPLICADO ✔
+                seen.add(key)
+                jobs.append((idx, url_midia))
         else:
-            # Sem media → marque erro mínimo somente se não houver nada preenchido
+            # falta de mídia
             if item.get("transcricao") is None and item.get("framesDescricao") is None:
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
                 item["framesDescricao"] = None
 
     if not jobs:
-        # nada para processar; já garantimos ai_model_data acima
         return resultados
 
+    # ==========================================================
+    # 🔹 Progresso seguro
+    # ==========================================================
     total = len(jobs)
-    concluídos = 0
+    concluidos = 0
 
+    # ==========================================================
+    # 🔹 Executor de threads
+    # ==========================================================
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_thread_worker, idx, url, sem) for idx, url in jobs]
+
+        futs = [
+            ex.submit(_thread_worker, idx, url, None)
+            for idx, url in jobs
+        ]
+
         for fut in as_completed(futs):
+
             (
                 idx,
                 transcricao,
@@ -1888,16 +1959,16 @@ def anexar_transcricoes_threaded(
                 erro,
             ) = fut.result()
 
+            # ----------------------------
+            # preencher resultados[idx]
+            # ----------------------------
             if transcricao is not None:
                 resultados[idx]["transcricao"] = transcricao
-            # 🚨 REMOVIDO: Não armazena base64Frames na memória global resultados[idx]
-            # if frames is not None:
-            #     resultados[idx]["base64Frames"] = frames 
-            
+
+            # não guardamos base64Frames (memory-safe)
             if frames_desc is not None:
                 resultados[idx]["framesDescricao"] = frames_desc
 
-            # ✅ único campo agregado para dados da IA
             resultados[idx]["ai_model_data"] = ai_model_data or {
                 "ai_model": "gpt-5-nano",
                 "input_tokens": None,
@@ -1910,39 +1981,34 @@ def anexar_transcricoes_threaded(
             else:
                 resultados[idx].pop("transcricao_erro", None)
 
-            # ✅ Atualiza progresso
-            concluídos += 1
+            # ----------------------------
+            # progresso do callback
+            # ----------------------------
+            concluidos += 1
             if callback:
                 try:
-                    callback(concluídos, total)
+                    callback(concluidos, total)
                 except Exception as e:
-                    tlog(f"[CALLBACK] ⚠️ erro no callback de progresso: {e}")
+                    tlog(f"[CALLBACK] ⚠️ erro no callback: {e}")
 
-    # segurança: garante ai_model_data em todos (inclusive vindos do Mongo ou sem mídia)
+    # ==========================================================
+    # 🔹 Garantia de estrutura após o processamento
+    # ==========================================================
     for item in resultados:
-        if "ai_model_data" not in item or not isinstance(item["ai_model_data"], dict):
-            item["ai_model_data"] = {
-                "ai_model": "gpt-5-nano",
-                "input_tokens": None,
-                "output_tokens": None,
-                "audio_seconds": None,
-            }
-        else:
-            # completa chaves eventualmente faltantes
-            item["ai_model_data"].setdefault("ai_model", "gpt-5-nano")
-            item["ai_model_data"].setdefault("input_tokens", None)
-            item["ai_model_data"].setdefault("output_tokens", None)
-            item["ai_model_data"].setdefault("audio_seconds", None)
-            item["ai_model_data"].setdefault("num_images", 0)
-            item["ai_model_data"].setdefault("estimated_image_tokens", 0)
-        
-        # Garante que base64Frames seja uma lista vazia, mas não armazene o conteúdo.
-        item.setdefault("base64Frames", [])
-        if isinstance(item["base64Frames"], list) and len(item["base64Frames"]) > 0:
-            # Se por algum motivo base64Frames foi preenchido, limpa para economizar RAM
-            tlog(f"[WARN] Limpando base64Frames acidentalmente preenchido em {item.get('url')}")
-            item["base64Frames"] = []
 
+        amd = item.setdefault("ai_model_data", {})
+        amd.setdefault("ai_model", "gpt-5-nano")
+        amd.setdefault("input_tokens", None)
+        amd.setdefault("output_tokens", None)
+        amd.setdefault("audio_seconds", None)
+        amd.setdefault("num_images", 0)
+        amd.setdefault("estimated_image_tokens", 0)
+
+        # força base64Frames como lista vazia
+        item.setdefault("base64Frames", [])
+        if isinstance(item["base64Frames"], list) and item["base64Frames"]:
+            tlog(f"[WARN] Limpando base64Frames acidentalmente preenchido")
+            item["base64Frames"] = []
 
     return resultados
 
@@ -2371,7 +2437,11 @@ async def fetch_social_post_summary_async(
     if len(results) > max_results:
         results = results[:max_results]
 
+    # Sanitização final: remove itens None ou não-dicts
+    results = [r for r in results if isinstance(r, dict)]
+
     tlog(f"[FETCH] Finalizado: {len(results)} item(ns) total.")
+    
     return results
 
 async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
@@ -2435,6 +2505,12 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
             _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
 
         tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} posts")
+        print("Checando resultados malformados...")
+            for i, r in enumerate(resultados):
+                if r is None:
+                    print(f"[ERRO] resultados[{i}] == None")
+                elif not isinstance(r, dict):
+                    print(f"[ERRO] resultados[{i}] NÃO É dict: {type(r)}")
         anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
         tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
 
