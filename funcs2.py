@@ -2008,9 +2008,9 @@ def anexar_transcricoes_threaded(
     for i in range(len(resultados)):
         item = resultados[i]
     
-        # Se o item não é dict, cria um dict mínimo e pula normalização interna
+        # Se o item não é dict, cria um dict mínimo e normaliza
         if not isinstance(item, dict):
-            tlog(f"[ERRO] resultados[{i}] inválido (None ou não-dict). Normalizando para estrutura mínima.")
+            tlog(f"[ERRO] resultados[{i}] inválido (None/não-dict). Normalizando para estrutura mínima.")
             resultados[i] = {
                 "transcricao": None,
                 "framesDescricao": None,
@@ -2020,23 +2020,31 @@ def anexar_transcricoes_threaded(
             }
             continue
     
-        # Normalização para itens válidos
+        # Campos básicos
         item.setdefault("transcricao", None)
         item.setdefault("framesDescricao", None)
         item.setdefault("transcricao_erro", None)
-        item.setdefault("base64Frames", [])
-        amd = item.setdefault("ai_model_data", {})
     
+        # Força base64Frames como lista vazia (zero RAM)
+        bf = item.get("base64Frames")
+        if not isinstance(bf, list) or bf:
+            tlog(f"[WARN] resultados[{i}].base64Frames estava preenchido ou inválido. Resetando para [].")
+            item["base64Frames"] = []
+    
+        # ai_model_data robusto
+        amd = item.get("ai_model_data")
+        if amd is None or not isinstance(amd, dict):
+            tlog(f"[WARN] resultados[{i}].ai_model_data inválido ({type(amd)}). Recriando dict vazio.")
+            amd = {}
+            item["ai_model_data"] = amd
+    
+        # Normalização do conteúdo interno
         amd.setdefault("ai_model", "gpt-5-nano")
         amd.setdefault("input_tokens", None)
         amd.setdefault("output_tokens", None)
         amd.setdefault("audio_seconds", None)
         amd.setdefault("num_images", 0)
         amd.setdefault("estimated_image_tokens", 0)
-    
-        # Força base64Frames como lista vazia
-        if not isinstance(item["base64Frames"], list):
-            item["base64Frames"] = []
     
     return resultados
 
@@ -2594,6 +2602,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
