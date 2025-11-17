@@ -470,7 +470,56 @@ def analyze_post(post):
         - Sempre escreva em formato analítico, crítico e detalhado.
         - Use linguagem profissional, clara e bem estruturada.
         - Evite respostas genéricas; sempre use evidências da transcrição ou descrição visual.
-        - Se for imagem, omita a seção 6 (“Eficácia do Hook”) e adapte as demais.
+        - Se for imagem, omita a seção 6 (Eficácia do Hook) e adapte as demais.
+
+        Exemplo de saída (apenas para referência):
+        1. Visão Geral e Primeiras Impressões
+        O vídeo transmite uma mensagem de paixão pela praia e pelo surfe, conectando-a à trajetória pessoal do protagonista e à marca Corona. O sentimento geral é de nostalgia, leveza e celebração da vida ao ar livre, com um tom autêntico e inspirador. A narrativa se desenvolve de forma pessoal e intimista, mostrando a evolução do surfista desde a infância até o sucesso profissional, sempre com a praia como pano de fundo.
+    
+        2. Pontos Positivos Estratégicos
+        Storytelling eficaz: A narrativa biográfica do protagonista cria uma conexão emocional com o público, tornando a mensagem da Corona mais autêntica e memorável. A jornada pessoal do surfista ressoa com a trajetória da própria marca, que também construiu sua história ao longo de 100 anos.
+        Conexão emocional forte: O vídeo apela à nostalgia e à lembrança de momentos simples e felizes da infância, criando uma identificação imediata com o público. A paixão do surfista pela praia é contagiante e inspiradora.
+        Clareza da proposta de valor: Embora sutil, a mensagem de Corona como parte integrante da cultura da praia e do surfe é transmitida com clareza. A marca se apresenta como parceira, presente em momentos importantes da vida do protagonista e de seus amigos.
+        Originalidade na estética: O estilo de filme caseiro antigo, com transições e efeitos que simulam uma fita VHS, confere originalidade e um toque nostálgico ao vídeo. Este recurso contribui para a construção da narrativa pessoal e intimista.
+    
+        3. Pontos de Melhoria e Oportunidades
+        Ritmo da narrativa: Algumas transições entre as cenas poderiam ser mais fluidas, otimizando o ritmo. A inclusão de mais cenas de ação durante a prática do surfe, em momentos mais dinâmicos, poderia criar um contraste interessante com as cenas mais contemplativas.
+        Apresentação da marca: Embora a marca esteja presente, uma integração mais sutil e orgânica da logo e da garrafa poderia ser mais eficaz. A repetição do logotipo no final poderia ser mais criativa e impactante.
+        Explorar o universo feminino: O vídeo centra-se majoritariamente no protagonista masculino. A inclusão de mais cenas com mulheres praticando surfe ou desfrutando da praia, de forma natural e orgânica, poderia ampliar o alcance e a identificação do público.
+    
+        4. Análise Estética e de Produção
+        Qualidade Visual: A cinematografia é boa, com imagens de alta qualidade. A iluminação é natural e bem equilibrada, transmitindo a atmosfera da praia. A paleta de cores é vibrante e harmônica, com tons quentes e suaves que remetem ao clima tropical e relaxante da praia.
+        Edição: A edição utiliza recursos criativos para simular uma fita VHS antiga, o que contribui para a estética geral. No entanto, o ritmo da edição poderia ser mais dinâmico em alguns pontos.
+        Design e Branding: A marca Corona está bem integrada, mas poderia ser explorada de forma mais criativa. As legendas são legíveis e bem posicionadas.
+        Áudio: A trilha sonora é adequada, criando uma atmosfera relaxante e envolvente. Não há narração, o que permite que a narrativa visual e a voz do protagonista sejam os focos principais.
+    
+        5. Análise da Linguagem e Comunicação
+        Verbal: O tom de voz é natural e autêntico, compatível com a identidade do protagonista e da marca. A dicção é clara e o vocabulário é adequado ao público-alvo.
+        Não Verbal: A linguagem corporal do protagonista é espontânea e transmite a paixão pelo surfe e pela praia.
+        Textual (on-screen): As legendas são bem desenhadas, legíveis e complementam a narrativa, sem sobrecarregar a imagem.
+        Mensagem Central: A mensagem principal é transmitida de forma clara e concisa, embora a integração da marca poderia ser aprimorada.
+    
+        6. Eficácia do Hook (Gancho Inicial)
+        O hook com a imagem da praia e a logo da Corona, com filtro VHS, é atraente e cria uma expectativa. No entanto, poderia ser mais impactante se iniciasse com uma cena de ação mais forte, que capturasse imediatamente a atenção do espectador.
+        Sugestões: Iniciar com uma cena de surfe espetacular ou um close no rosto do protagonista, transmitindo entusiasmo e paixão.
+    
+        7. Timing, Ritmo e Duração
+        O vídeo tem um ritmo moderado, mas algumas partes poderiam ser mais dinâmicas. A duração (56 segundos) é adequada para a maioria das plataformas de mídia social.
+    
+        8. O Que Funcionou e Deveria Ser Replicado (Key Takeaways Positivos)
+        Narrativa biográfica: A estratégia de usar a história pessoal do surfista para conectar com o público e transmitir a mensagem da marca foi muito eficaz.
+        Estética nostálgica: O estilo VHS contribuiu para a originalidade e memorabilidade do vídeo.
+        Conexão autêntica: A espontaneidade e a naturalidade do protagonista criaram uma conexão genuína com o público.
+    
+        9. O Que Não Funcionou Tão Bem e Deveria Ser Revisto/Evitado (Learnings)
+        Ritmo inconsistente: O vídeo apresenta momentos mais lentos que poderiam ser editados para um ritmo mais acelerado.
+        Integração da marca: A marca poderia ter uma presença mais sutil e orgânica ao longo do vídeo.
+        Falta de diversidade: A falta de representatividade feminina é um ponto a ser revisado em futuras produções.
+    
+        10. Recomendações Estratégicas para Encantar o Cliente (Próximos Passos)
+        Série de vídeos: Criar uma série de vídeos curtos, cada um focando em um aspecto diferente da cultura do surfe e da praia, mantendo a estética nostálgica e a narrativa pessoal. Isso amplia o alcance e gera engajamento contínuo.
+        Parcerias estratégicas: Colaborar com influenciadores digitais e atletas do surfe, criando conteúdo em conjunto e ampliando o alcance da campanha.
+        Inovação tecnológica: Explorar novas tecnologias de produção, como realidade virtual ou realidade aumentada, para criar experiências imersivas e inovadoras para o público. Isso demonstra a vanguarda e a capacidade de adaptação da marca.
         
         """
             },
@@ -484,8 +533,8 @@ def analyze_post(post):
     tokens_total = resp.usage.total_tokens if resp.usage else None
 
     return {
-        "analise": text,
-        "tokens_total": tokens_total or 0
+        "analise_texto": text,
+        "analise_tokens": tokens_total or 0
     }
 
 def process_single_post(index, post):
@@ -2876,6 +2925,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
