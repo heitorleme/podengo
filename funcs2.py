@@ -551,23 +551,6 @@ def process_single_post(index, post):
 
     return post
 
-# --- função auxiliar para reportar progresso normalizado ---
-def _safe_progress(percent: float, msg: str = ""):
-    """Garante que o valor do progresso fique entre 0 e 100 e captura erros do Streamlit."""
-    if not progress_callback:
-        return
-    try:
-        percent = max(0.0, min(1.0, percent)) # mantém entre 0 e 1
-        progress_callback(round(percent, 2), msg) # envia 0–100%
-    except Exception as e:
-        print(f"[Aviso] progress_callback falhou: {e}")
-
-def update_step(msg):
-    nonlocal step
-    step += 1
-    _safe_progress(step / total_steps, msg)
-
-
 def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     """
     Extrai entre 5 e 15 frames de um vídeo usando FFmpeg, sem decodificar tudo com OpenCV.
@@ -2223,8 +2206,6 @@ def anexar_transcricoes_threaded(
 # ==========================================================
 # 2.5️⃣ GERAR ANÁLISE GPT DOS VÍDEOS / POSTS
 # ==========================================================
-update_step("📝 Gerando análise dos vídeos...")
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _analisar_item(i, item):
@@ -2838,6 +2819,22 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
     step = 0
     final_results: List[dict] = []
 
+        # --- função auxiliar para reportar progresso normalizado ---
+    def _safe_progress(percent: float, msg: str = ""):
+        """Garante que o valor do progresso fique entre 0 e 100 e captura erros do Streamlit."""
+        if not progress_callback:
+            return
+        try:
+            percent = max(0.0, min(1.0, percent)) # mantém entre 0 e 1
+            progress_callback(round(percent, 2), msg) # envia 0–100%
+        except Exception as e:
+            print(f"[Aviso] progress_callback falhou: {e}")
+    
+    def update_step(msg):
+        nonlocal step
+        step += 1
+        _safe_progress(step / total_steps, msg)
+
     try:
         # ----------------------------
         # 1️⃣ Buscar/baixar posts
@@ -2942,4 +2939,3 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
-
