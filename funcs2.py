@@ -416,7 +416,7 @@ def analyze_post(post):
     user_prompt = _build_post_prompt(post)
 
     resp = client.chat.completions.create(
-        model=OPENAI_CHAT_MODEL,
+        model="gpt-5-nano",
         messages=[
             {"role": "system", "content": """Você é um Diretor de Criação e Estrategista de Conteúdo Sênior em uma agência de publicidade de renome.\n"
     "Sua tarefa é realizar uma análise crítica e aprofundada do vídeo fornecido, como se estivesse preparando um relatório de performance para um cliente importante.\n"
@@ -2908,5 +2908,6 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
