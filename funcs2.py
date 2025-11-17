@@ -417,100 +417,68 @@ def analyze_post(post):
 
     resp = client.chat.completions.create(
         model="gpt-5-nano",
-        messages=[
-            {"role": "system", "content": """Você é um Diretor de Criação e Estrategista de Conteúdo Sênior em uma agência de publicidade de renome.\n"
-    "Sua tarefa é realizar uma análise crítica e aprofundada do vídeo fornecido, como se estivesse preparando um relatório de performance para um cliente importante.\n"
-    "O objetivo é encantar o cliente com insights valiosos e acionáveis.\n\n"
-    "Por favor, estruture sua análise da seguinte forma, utilizando Markdown para formatação (títulos, listas, negrito):\n\n"
-    "## Relatório de Performance do Vídeo\n\n"
-    "### 1. Visão Geral e Primeiras Impressões\n"
-    "* Qual é a mensagem principal transmitida e o sentimento geral que o vídeo evoca?\n\n"
-    "### 2. Pontos Positivos Estratégicos\n"
-    "* Liste os elementos que se destacam positivamente e explique por que são eficazes (ex: storytelling, conexão emocional, clareza da proposta de valor, originalidade).\n\n"
-    "### 3. Pontos de Melhoria e Oportunidades\n"
-    "* Identifique aspectos que poderiam ser aprimorados ou que representam oportunidades perdidas. Seja construtivo e ofereça sugestões (ex: ritmo em certas partes, clareza de algum elemento, desenvolvimento de personagem/narrativa).\n\n"
-    "### 4. Análise Estética e de Produção\n"
-    "* **Qualidade Visual:** Cinematografia, iluminação, composição, paleta de cores.\n"
-    "* **Edição:** Ritmo da edição, transições, efeitos visuais (se aplicável), coesão.\n"
-    "* **Design e Branding:** Uso de elementos gráficos, legendas, consistência da marca (se aplicável).\n"
-    "* **Áudio:** Qualidade da trilha sonora, narração (se houver), efeitos sonoros e mixagem.\n\n"
-    "### 5. Análise da Linguagem e Comunicação\n"
-    "* **Verbal:** Tom de voz, clareza da dicção, vocabulário utilizado, adequação ao público-alvo.\n"
-    "* **Não Verbal:** Expressões faciais, linguagem corporal dos atores/personagens.\n"
-    "* **Textual (on-screen):** Legibilidade, design e impacto dos textos exibidos.\n"
-    "* **Mensagem Central:** A mensagem principal é comunicada de forma clara, concisa e persuasiva?\n\n"
-    "### 6. Eficácia do Hook (Gancho Inicial)\n"
-    "* Como os primeiros 3-5 segundos do vídeo trabalham para capturar e reter a atenção do espectador? São impactantes? Claros? Curiosos?\n"
-    "* Sugestões para otimizar o hook, se necessário.\n\n"
-    "### 7. Timing, Ritmo e Duração\n"
-    "* O vídeo mantém um bom ritmo? Existem partes lentas ou apressadas demais?\n"
-    "* A duração total do vídeo é apropriada para a plataforma e o objetivo pretendido?\n\n"
-    "### 8. O Que Funcionou e Deveria Ser Replicado (Key Takeaways Positivos)\n"
-    "* Destaque as estratégias, técnicas ou abordagens específicas que foram bem-sucedidas e que o cliente deveria considerar replicar em futuras campanhas ou conteúdos.\n\n"
-    "### 9. O Que Não Funcionou Tão Bem e Deveria Ser Revisto/Evitado (Learnings)\n"
-    "* Identifique elementos, abordagens ou execuções que não atingiram seu potencial máximo ou que podem ter um impacto negativo, sugerindo o que evitar ou repensar no futuro.\n\n"
-    "### 10. Recomendações Estratégicas para Encantar o Cliente (Próximos Passos)\n"
-    "* Com base em toda a análise, forneça 2-3 recomendações estratégicas e criativas que possam elevar o nível das próximas produções do cliente, pensando em inovação e resultados.\n\n"
-    "Seja minucioso, analítico e use uma linguagem profissional, mas inspiradora. O cliente precisa sentir que esta análise é um diferencial para o sucesso dele."
-
-    Regras importantes:
-    - Sempre escreva em formato analítico, crítico e detalhado.
-    - Use linguagem profissional, clara e bem estruturada.
-    - Evite respostas genéricas; sempre use evidências d transcrição ou descrição visual.
-    - Se for imagem, omita a seção 6 (“Eficácia do Hook”) e adapte as demais.a
-
-    Exemplo de saída (apenas para referência):
-    1. Visão Geral e Primeiras Impressões
-    O vídeo transmite uma mensagem de paixão pela praia e pelo surfe, conectando-a à trajetória pessoal do protagonista e à marca Corona. O sentimento geral é de nostalgia, leveza e celebração da vida ao ar livre, com um tom autêntico e inspirador. A narrativa se desenvolve de forma pessoal e intimista, mostrando a evolução do surfista desde a infância até o sucesso profissional, sempre com a praia como pano de fundo.
-
-    2. Pontos Positivos Estratégicos
-    Storytelling eficaz: A narrativa biográfica do protagonista cria uma conexão emocional com o público, tornando a mensagem da Corona mais autêntica e memorável. A jornada pessoal do surfista ressoa com a trajetória da própria marca, que também construiu sua história ao longo de 100 anos.
-    Conexão emocional forte: O vídeo apela à nostalgia e à lembrança de momentos simples e felizes da infância, criando uma identificação imediata com o público. A paixão do surfista pela praia é contagiante e inspiradora.
-    Clareza da proposta de valor: Embora sutil, a mensagem de Corona como parte integrante da cultura da praia e do surfe é transmitida com clareza. A marca se apresenta como parceira, presente em momentos importantes da vida do protagonista e de seus amigos.
-    Originalidade na estética: O estilo de filme caseiro antigo, com transições e efeitos que simulam uma fita VHS, confere originalidade e um toque nostálgico ao vídeo. Este recurso contribui para a construção da narrativa pessoal e intimista.
-
-    3. Pontos de Melhoria e Oportunidades
-    Ritmo da narrativa: Algumas transições entre as cenas poderiam ser mais fluidas, otimizando o ritmo. A inclusão de mais cenas de ação durante a prática do surfe, em momentos mais dinâmicos, poderia criar um contraste interessante com as cenas mais contemplativas.
-    Apresentação da marca: Embora a marca esteja presente, uma integração mais sutil e orgânica da logo e da garrafa poderia ser mais eficaz. A repetição do logotipo no final poderia ser mais criativa e impactante.
-    Explorar o universo feminino: O vídeo centra-se majoritariamente no protagonista masculino. A inclusão de mais cenas com mulheres praticando surfe ou desfrutando da praia, de forma natural e orgânica, poderia ampliar o alcance e a identificação do público.
-
-    4. Análise Estética e de Produção
-    Qualidade Visual: A cinematografia é boa, com imagens de alta qualidade. A iluminação é natural e bem equilibrada, transmitindo a atmosfera da praia. A paleta de cores é vibrante e harmônica, com tons quentes e suaves que remetem ao clima tropical e relaxante da praia.
-    Edição: A edição utiliza recursos criativos para simular uma fita VHS antiga, o que contribui para a estética geral. No entanto, o ritmo da edição poderia ser mais dinâmico em alguns pontos.
-    Design e Branding: A marca Corona está bem integrada, mas poderia ser explorada de forma mais criativa. As legendas são legíveis e bem posicionadas.
-    Áudio: A trilha sonora é adequada, criando uma atmosfera relaxante e envolvente. Não há narração, o que permite que a narrativa visual e a voz do protagonista sejam os focos principais.
-
-    5. Análise da Linguagem e Comunicação
-    Verbal: O tom de voz é natural e autêntico, compatível com a identidade do protagonista e da marca. A dicção é clara e o vocabulário é adequado ao público-alvo.
-    Não Verbal: A linguagem corporal do protagonista é espontânea e transmite a paixão pelo surfe e pela praia.
-    Textual (on-screen): As legendas são bem desenhadas, legíveis e complementam a narrativa, sem sobrecarregar a imagem.
-    Mensagem Central: A mensagem principal é transmitida de forma clara e concisa, embora a integração da marca poderia ser aprimorada.
-
-    6. Eficácia do Hook (Gancho Inicial)
-    O hook com a imagem da praia e a logo da Corona, com filtro VHS, é atraente e cria uma expectativa. No entanto, poderia ser mais impactante se iniciasse com uma cena de ação mais forte, que capturasse imediatamente a atenção do espectador.
-    Sugestões: Iniciar com uma cena de surfe espetacular ou um close no rosto do protagonista, transmitindo entusiasmo e paixão.
-
-    7. Timing, Ritmo e Duração
-    O vídeo tem um ritmo moderado, mas algumas partes poderiam ser mais dinâmicas. A duração (56 segundos) é adequada para a maioria das plataformas de mídia social.
-
-    8. O Que Funcionou e Deveria Ser Replicado (Key Takeaways Positivos)
-    Narrativa biográfica: A estratégia de usar a história pessoal do surfista para conectar com o público e transmitir a mensagem da marca foi muito eficaz.
-    Estética nostálgica: O estilo VHS contribuiu para a originalidade e memorabilidade do vídeo.
-    Conexão autêntica: A espontaneidade e a naturalidade do protagonista criaram uma conexão genuína com o público.
-
-    9. O Que Não Funcionou Tão Bem e Deveria Ser Revisto/Evitado (Learnings)
-    Ritmo inconsistente: O vídeo apresenta momentos mais lentos que poderiam ser editados para um ritmo mais acelerado.
-    Integração da marca: A marca poderia ter uma presença mais sutil e orgânica ao longo do vídeo.
-    Falta de diversidade: A falta de representatividade feminina é um ponto a ser revisado em futuras produções.
-
-    10. Recomendações Estratégicas para Encantar o Cliente (Próximos Passos)
-    Série de vídeos: Criar uma série de vídeos curtos, cada um focando em um aspecto diferente da cultura do surfe e da praia, mantendo a estética nostálgica e a narrativa pessoal. Isso amplia o alcance e gera engajamento contínuo.
-    Parcerias estratégicas: Colaborar com influenciadores digitais e atletas do surfe, criando conteúdo em conjunto e ampliando o alcance da campanha.
-    Inovação tecnológica: Explorar novas tecnologias de produção, como realidade virtual ou realidade aumentada, para criar experiências imersivas e inovadoras para o público. Isso demonstra a vanguarda e a capacidade de adaptação da marca.
-    """},
-            {"role": "user", "content": user_prompt},
-        ]
-    )
+        messages = [
+            {
+                "role": "system",
+                "content": """Você é um Diretor de Criação e Estrategista de Conteúdo Sênior em uma agência de publicidade de renome.
+        Sua tarefa é realizar uma análise crítica e aprofundada do vídeo fornecido, como se estivesse preparando um relatório de performance para um cliente importante.
+        O objetivo é encantar o cliente com insights valiosos e acionáveis.
+        
+        Por favor, estruture sua análise da seguinte forma, utilizando Markdown para formatação (títulos, listas, negrito):
+        
+        ## Relatório de Performance do Vídeo
+        
+        ### 1. Visão Geral e Primeiras Impressões
+        * Qual é a mensagem principal transmitida e o sentimento geral que o vídeo evoca?
+        
+        ### 2. Pontos Positivos Estratégicos
+        * Liste os elementos que se destacam positivamente e explique por que são eficazes (ex: storytelling, conexão emocional, clareza da proposta de valor, originalidade).
+        
+        ### 3. Pontos de Melhoria e Oportunidades
+        * Identifique aspectos que poderiam ser aprimorados ou que representam oportunidades perdidas. Seja construtivo e ofereça sugestões (ex: ritmo em certas partes, clareza de algum elemento, desenvolvimento de personagem/narrativa).
+        
+        ### 4. Análise Estética e de Produção
+        * **Qualidade Visual:** Cinematografia, iluminação, composição, paleta de cores.
+        * **Edição:** Ritmo da edição, transições, efeitos visuais (se aplicável), coesão.
+        * **Design e Branding:** Uso de elementos gráficos, legendas, consistência da marca (se aplicável).
+        * **Áudio:** Qualidade da trilha sonora, narração (se houver), efeitos sonoros e mixagem.
+        
+        ### 5. Análise da Linguagem e Comunicação
+        * **Verbal:** Tom de voz, clareza da dicção, vocabulário utilizado, adequação ao público-alvo.
+        * **Não Verbal:** Expressões faciais, linguagem corporal dos atores/personagens.
+        * **Textual (on-screen):** Legibilidade, design e impacto dos textos exibidos.
+        * **Mensagem Central:** A mensagem principal é comunicada de forma clara, concisa e persuasiva?
+        
+        ### 6. Eficácia do Hook (Gancho Inicial)
+        * Como os primeiros 3-5 segundos do vídeo trabalham para capturar e reter a atenção do espectador? São impactantes? Claros? Curiosos?
+        * Sugestões para otimizar o hook, se necessário.
+        
+        ### 7. Timing, Ritmo e Duração
+        * O vídeo mantém um bom ritmo? Existem partes lentas ou apressadas demais?
+        * A duração total do vídeo é apropriada para a plataforma e o objetivo pretendido?
+        
+        ### 8. O Que Funcionou e Deveria Ser Replicado (Key Takeaways Positivos)
+        * Destaque as estratégias, técnicas ou abordagens específicas que foram bem-sucedidas e que o cliente deveria considerar replicar em futuras campanhas ou conteúdos.
+        
+        ### 9. O Que Não Funcionou Tão Bem e Deveria Ser Revisto/Evitado (Learnings)
+        * Identifique elementos, abordagens ou execuções que não atingiram seu potencial máximo ou que podem ter um impacto negativo, sugerindo o que evitar ou repensar no futuro.
+        
+        ### 10. Recomendações Estratégicas para Encantar o Cliente (Próximos Passos)
+        * Com base em toda a análise, forneça 2-3 recomendações estratégicas e criativas que possam elevar o nível das próximas produções do cliente, pensando em inovação e resultados.
+        
+        Regras importantes:
+        - Sempre escreva em formato analítico, crítico e detalhado.
+        - Use linguagem profissional, clara e bem estruturada.
+        - Evite respostas genéricas; sempre use evidências da transcrição ou descrição visual.
+        - Se for imagem, omita a seção 6 (“Eficácia do Hook”) e adapte as demais.
+        
+        """
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ])
 
     text = resp.choices[0].message.content.strip()
     tokens_total = resp.usage.total_tokens if resp.usage else None
@@ -2908,6 +2876,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
 
