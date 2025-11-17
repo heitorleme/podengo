@@ -486,7 +486,7 @@ def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
         "-hide_banner", "-loglevel", "error",
         "-y",
         "-i", path,
-        "-vf", f"fps=1/{interval}",
+        "-vf", "fps=1",
         "-q:v", "3",
         pattern
     ]
@@ -581,7 +581,7 @@ def _audio_temp_speed_from_video_ffmpeg(
 
 def transcrever_video_em_speed(
     video_path: str,
-    speed: float = 2.0,
+    speed: float = 1.5,
     sample_rate: int = 16000,
     ffmpeg_timeout: int = 120,
 ) -> Tuple[str, Optional[float]]:
@@ -2727,7 +2727,7 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         # 1️⃣ Buscar/baixar posts
         # ----------------------------
         update_step("🔍 Buscando e baixando posts...")
-        resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=1000)
+        resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=10000)
         final_results = resultados # mantém a referência para limpeza no finally
         if not resultados:
             print("Nenhum resultado retornado pelos scrapers.")
@@ -2826,4 +2826,5 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
