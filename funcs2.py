@@ -395,6 +395,44 @@ def _run_ffmpeg(cmd_args: list):
         err = proc.stderr.decode("utf-8", errors="ignore")
         raise RuntimeError(f"FFmpeg falhou:\n{err}")
 
+@retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(4))
+def analyze_post(row):
+    """
+    Envia o post para a API e retorna (texto, total_tokens).
+    """
+    user_prompt = _build_post_prompt(row)
+
+    resp = client.responses.create(
+        model=MODEL,
+        input=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
+    # Extrai texto
+    text = getattr(resp, "output_text", None)
+    if not text:
+        for block in getattr(resp, "output", []) or []:
+            for part in getattr(block, "content", []) or []:
+                if getattr(part, "type", "") == "output_text":
+                    text = getattr(part, "text", None)
+                    if text:
+                        break
+            if text:
+                break
+    if not text:
+        raise RuntimeError("Não foi possível extrair o texto da Responses API.")
+
+    # Extrai uso de tokens (se disponível)
+    total_tokens = None
+    if hasattr(resp, "usage") and resp.usage:
+        total_tokens = getattr(resp.usage, "total_tokens", None)
+    elif hasattr(resp, "response") and hasattr(resp.response, "usage"):
+        total_tokens = getattr(resp.response.usage, "total_tokens", None)
+
+    return text.strip(), total_tokens or 0
+
 def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     """
     Extrai entre 5 e 15 frames de um vídeo usando FFmpeg, sem decodificar tudo com OpenCV.
@@ -2045,7 +2083,169 @@ def anexar_transcricoes_threaded(
         amd.setdefault("audio_seconds", None)
         amd.setdefault("num_images", 0)
         amd.setdefault("estimated_image_tokens", 0)
+    return resultados
+
+# ==========================================================
+# 2.5️⃣ GERAR ANÁLISE GPT DOS VÍDEOS / POSTS
+# ==========================================================
+update_step("📝 Gerando análise dos vídeos...")
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def _analisar_item(i, item):
+    try:
+        texto, tokens = analyze_post({
+            "ownerUsername": item.get("ownerUsername"),
+            "caption": item.get("caption"),
+            "transcricao": item.get("transcricao"),
+            "framesDescricao": item.get("framesDescricao"),
+        })
+        item["analise"] = texto
+        item["analise_tokens"] = tokens
+        item["analise_erro"] = None
+    except Exception as e:
+        item["analise"] = None
+        item["analise_tokens"] = 0
+        item["analise_erro"] = str(e)
+    return i
+
+total_items = len(resultados)
+done = 0
+
+with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    futures = [ex.submit(_analisar_item, i, item) for i, item in enumerate(resultados)]
+    for fut in as_completed(futures):
+        done += 1
+        progresso_total = (step + (done / total_items)) / total_steps
+        _safe_progress(progresso_total, f"📝 Analisando ({done}/{total_items})...")
+
+def anexar_analises_threaded(
+    resultados: List[Dict[str, Any]],
+    max_workers: int = 4,
+    callback: Optional[Callable[[int, int], None]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Para cada item, gera a análise estruturada (usando analyze_post) em paralelo.
+    Campos preenchidos em cada item:
+      - analise: texto da análise em markdown
+      - analise_tokens: total de tokens usados na chamada
+      - analise_erro: mensagem de erro (se houver)
+    """
+
+    if not resultados:
+        return resultados
+
+    # Garantir que todos os itens são dicts válidos
+    for i, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            tlog(f"[ANALISE] [ERRO] resultados[{i}] não é dict. Substituindo por dict vazio.")
+            resultados[i] = {}
     
+    # ==========================================================
+    # 🔹 Criar lista de jobs (idx) que realmente precisam de análise
+    # ==========================================================
+    jobs: List[int] = []
+
+    for idx, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            continue
+
+        veio_mongo = bool(item.get("_from_mongo"))
+
+        # Se veio do mongo e já tem análise, pula
+        if veio_mongo and item.get("analise"):
+            continue
+
+        caption = item.get("caption") or ""
+        transcricao = item.get("transcricao") or ""
+        frames_desc = item.get("framesDescricao") or ""
+
+        # Se não tem absolutamente nada de texto pra analisar, marca erro e pula
+        if not (caption or transcricao or frames_desc):
+            if item.get("analise") is None and item.get("analise_erro") is None:
+                item["analise"] = None
+                item["analise_tokens"] = 0
+                item["analise_erro"] = "sem_texto_para_analisar"
+            continue
+
+        jobs.append(idx)
+
+    if not jobs:
+        tlog("[ANALISE] Nenhum item elegível para análise.")
+        return resultados
+
+    total = len(jobs)
+    concluidos = 0
+
+    tlog(f"[ANALISE] Iniciando geração de análises para {total} item(ns)...")
+
+    # ==========================================================
+    # 🔹 Worker de análise (executado em threads)
+    # ==========================================================
+    def _thread_analise(idx: int) -> Tuple[int, Optional[str], int, Optional[str]]:
+        item = resultados[idx]
+
+        # monta o "row" no formato esperado por analyze_post
+        row = {
+            "ownerUsername": item.get("ownerUsername") or item.get("creatorname") or "",
+            "caption": item.get("caption") or "",
+            "transcricao": item.get("transcricao") or "",
+            "framesDescricao": item.get("framesDescricao") or "",
+        }
+
+        try:
+            texto, tokens = analyze_post(row)
+            erro = None
+        except Exception as e:
+            texto = None
+            tokens = 0
+            erro = str(e)
+        return idx, texto, tokens, erro
+
+    # ==========================================================
+    # 🔹 Executor de threads
+    # ==========================================================
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_thread_analise, idx) for idx in jobs]
+
+        for fut in as_completed(futs):
+            idx, texto, tokens, erro = fut.result()
+
+            if idx is None or idx < 0 or idx >= len(resultados) or resultados[idx] is None:
+                tlog(f"[ANALISE] [ERRO] Worker retornou idx inválido ou item None: idx={idx}")
+                continue
+
+            item = resultados[idx]
+
+            item["analise"] = texto
+            item["analise_tokens"] = tokens
+            item["analise_erro"] = erro
+
+            concluidos += 1
+            if callback:
+                try:
+                    callback(concluidos, total)
+                except Exception as e:
+                    tlog(f"[ANALISE] [CALLBACK] ⚠️ erro no callback: {e}")
+
+    # ==========================================================
+    # 🔹 Normalização final da estrutura
+    # ==========================================================
+    for i, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            tlog(f"[ANALISE] [ERRO] resultados[{i}] inválido após análise. Normalizando.")
+            resultados[i] = {
+                "analise": None,
+                "analise_tokens": 0,
+                "analise_erro": "item_invalido_pos_analise",
+            }
+            continue
+
+        item.setdefault("analise", None)
+        item.setdefault("analise_tokens", 0)
+        item.setdefault("analise_erro", None)
+
+    tlog(f"[ANALISE] ✅ Concluído: {total} análises geradas.")
     return resultados
 
 def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[dict]:
@@ -2572,6 +2772,22 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         if filtrados > 0:
             tlog(f"[WARN] Removidos {filtrados} itens inválidos (None ou não-dict) após transcrição.")
 
+        # ----------------------------
+        # 2️⃣.5️ Gerar ANÁLISE GPT para cada post
+        # ----------------------------
+        tlog("[PIPELINE] Iniciando anexar_analises_threaded()...")
+
+        def local_progress_analise(concluidos, total):
+            # progresso dentro desta etapa, análogo ao da transcrição
+            progresso_total = (step + (concluidos / max(1, total))) / total_steps
+            _safe_progress(progresso_total, f"📝 Analisando posts ({concluidos}/{total})...")
+
+        anexar_analises_threaded(
+            resultados,
+            max_workers=max_workers,
+            callback=local_progress_analise,
+        )
+        tlog("[PIPELINE] Finalizou anexar_analises_threaded()")
 
         # ----------------------------
         # 3️⃣ Gerar embeddings
@@ -2610,12 +2826,3 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
-
-
-
-
-
-
-
-
-
