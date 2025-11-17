@@ -533,8 +533,8 @@ def analyze_post(post):
     tokens_total = resp.usage.total_tokens if resp.usage else None
 
     return {
-        "analise_texto": text,
-        "analise_tokens": tokens_total or 0
+        "analise": text,
+        "tokens_total": tokens_total or 0
     }
 
 def process_single_post(index, post):
@@ -562,7 +562,7 @@ def process_single_post(index, post):
     t1 = time.time()
 
     # Preenche no dicionário original
-    post["analise_texto"] = analise
+    post["analise"] = analise
     post["analise_status"] = status
     post["analise_tokens"] = tokens
     post["analise_tempo"] = round(t1 - t0, 2)
@@ -2292,9 +2292,11 @@ def anexar_analises_threaded(
             "transcricao": item.get("transcricao") or "",
             "framesDescricao": item.get("framesDescricao") or "",
         }
-        
+
         try:
-            texto, tokens = analyze_post(row)
+            result = analyze_post(row)          # <- chama a função
+            texto = result["analise"]           # <- lê as chaves corretas
+            tokens = result["tokens_total"]
             erro = None
         except Exception as e:
             texto = None
@@ -2925,8 +2927,3 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
-
-
-
-
-
