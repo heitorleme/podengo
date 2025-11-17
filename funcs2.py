@@ -412,6 +412,7 @@ def analyze_post(post):
     Retorna dict: { "analise": str, "tokens_total": int }
     """
 
+    _, client, _ = get_clients()
     user_prompt = _build_post_prompt(post)
 
     resp = client.chat.completions.create(
@@ -2907,4 +2908,5 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
