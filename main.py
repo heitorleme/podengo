@@ -127,6 +127,9 @@ def _sanitize_items(resultados):
                     "subcategoria",
                     "comunidade_predita",
                     "comunidades_proporcoes",
+                    "analise", 
+                    "analise_tokens", 
+                    "analise_erro"
                 ]
             }
             item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
@@ -248,4 +251,5 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
 # ----------------------------
 if __name__ == "__main__":
     print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
+
 
