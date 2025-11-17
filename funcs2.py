@@ -2203,38 +2203,6 @@ def anexar_transcricoes_threaded(
         amd.setdefault("estimated_image_tokens", 0)
     return resultados
 
-# ==========================================================
-# 2.5️⃣ GERAR ANÁLISE GPT DOS VÍDEOS / POSTS
-# ==========================================================
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-def _analisar_item(i, item):
-    try:
-        texto, tokens = analyze_post({
-            "ownerUsername": item.get("ownerUsername"),
-            "caption": item.get("caption"),
-            "transcricao": item.get("transcricao"),
-            "framesDescricao": item.get("framesDescricao"),
-        })
-        item["analise"] = texto
-        item["analise_tokens"] = tokens
-        item["analise_erro"] = None
-    except Exception as e:
-        item["analise"] = None
-        item["analise_tokens"] = 0
-        item["analise_erro"] = str(e)
-    return i
-
-total_items = len(resultados)
-done = 0
-
-with ThreadPoolExecutor(max_workers=max_workers) as ex:
-    futures = [ex.submit(_analisar_item, i, item) for i, item in enumerate(resultados)]
-    for fut in as_completed(futures):
-        done += 1
-        progresso_total = (step + (done / total_items)) / total_steps
-        _safe_progress(progresso_total, f"📝 Analisando ({done}/{total_items})...")
-
 def anexar_analises_threaded(
     resultados: List[Dict[str, Any]],
     max_workers: int = 4,
@@ -2306,7 +2274,7 @@ def anexar_analises_threaded(
             "transcricao": item.get("transcricao") or "",
             "framesDescricao": item.get("framesDescricao") or "",
         }
-
+        
         try:
             texto, tokens = analyze_post(row)
             erro = None
@@ -2939,3 +2907,4 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
