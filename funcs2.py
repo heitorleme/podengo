@@ -183,7 +183,7 @@ MEDIA_FIELDS = ["mediaUrl", "mediaLocalPath", "mediaLocalPaths"]
 OTHER_FIELDS = [
     "likesCount", "commentsCount", "videoPlayCount", "videoViewCount",
     "audio_id", "audio_snapshot", "hashtags", "mentions",
-    "ai_model_data"
+    "ai_model_data", "analise", "analise_tokens", "analise_erro"
 ]
 
 MONGO_FETCH_FIELDS = MONGO_FIELDS + OTHER_FIELDS
@@ -2826,3 +2826,4 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
