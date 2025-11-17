@@ -399,39 +399,24 @@ def _run_ffmpeg(cmd_args: list):
 def analyze_post(row):
     """
     Envia o post para a API e retorna (texto, total_tokens).
+    Usa Chat Completions (mais estável que Responses).
     """
     user_prompt = _build_post_prompt(row)
 
-    resp = client.responses.create(
+    resp = client.chat.completions.create(
         model=MODEL,
-        input=[
+        messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
     )
 
-    # Extrai texto
-    text = getattr(resp, "output_text", None)
-    if not text:
-        for block in getattr(resp, "output", []) or []:
-            for part in getattr(block, "content", []) or []:
-                if getattr(part, "type", "") == "output_text":
-                    text = getattr(part, "text", None)
-                    if text:
-                        break
-            if text:
-                break
-    if not text:
-        raise RuntimeError("Não foi possível extrair o texto da Responses API.")
+    # sempre existe choices[0].message.content
+    text = resp.choices[0].message.content.strip()
 
-    # Extrai uso de tokens (se disponível)
-    total_tokens = None
-    if hasattr(resp, "usage") and resp.usage:
-        total_tokens = getattr(resp.usage, "total_tokens", None)
-    elif hasattr(resp, "response") and hasattr(resp.response, "usage"):
-        total_tokens = getattr(resp.response.usage, "total_tokens", None)
+    total_tokens = resp.usage.total_tokens if resp.usage else None
 
-    return text.strip(), total_tokens or 0
+    return text, total_tokens or 0
 
 def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     """
@@ -2826,5 +2811,6 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         except Exception as cleanup_error:
              tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
         raise # relança o erro original
+
 
 
