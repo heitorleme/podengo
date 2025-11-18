@@ -2241,9 +2241,17 @@ def anexar_analises_threaded(
     # Garantir dicts válidos
     # ==========================
     for i, item in enumerate(resultados):
-        if not isinstance(item, dict):
-            tlog(f"[ANALISE] [ERRO] resultados[{i}] não é dict. Substituindo por dict vazio.")
-            resultados[i] = {}
+        if not isinstance(item, dict) or item is None:
+            resultados[i] = {
+                "caption": "",
+                "transcricao": "",
+                "framesDescricao": "",
+                "_from_mongo": False,
+            }
+        else:
+            item.setdefault("caption", "")
+            item.setdefault("transcricao", "")
+            item.setdefault("framesDescricao", "")
 
     # ==========================
     # Selecionar jobs a analisar
@@ -2357,7 +2365,15 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
 
     batch_size: número máximo de textos por chamada à API (100 recomendado)
     """
-
+    # sanitização extrema — remove ou normaliza qualquer item inválido
+    for i, item in enumerate(resultados):
+        if not isinstance(item, dict) or item is None:
+            resultados[i] = {"caption": "", "transcricao": "", "framesDescricao": ""}
+            continue
+    
+        item.setdefault("caption", "")
+        item.setdefault("transcricao", "")
+        item.setdefault("framesDescricao", "")
     if not resultados:
         return resultados
 
@@ -2377,13 +2393,20 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
         transcricao = item.get("transcricao") or ""
         frames = item.get("framesDescricao") or ""
 
-        texto = f"caption: {caption} transcricao: {transcricao} frames: {frames}"
+        texto = f"{caption} {transcricao} {frames}".strip()
         texto = limpar_texto(texto)
-        if texto:
-            textos.append(texto)
-            idx_map.append(i)
-        else:
-            item["embedding"] = None # sem texto para vetorializar
+        
+        if not texto:
+            item["embedding"] = {
+                "vectorized_embedding": None,
+                "embedding_provider": "openai",
+                "embedding_model": model,
+                "error": "texto_vazio"
+            }
+            continue
+        
+        textos.append(texto)
+        idx_map.append(i)
 
     if not textos:
         return resultados
@@ -2577,11 +2600,23 @@ def classificar_via_mongo_vector_search(resultados, k=5, max_workers=max_workers
     Classifica cada item via MongoDB Atlas Vector Search (sem cache),
     garantindo segurança de tipos e compatibilidade com numpy arrays.
     """
-
+    # Garantia de tipo antes da clusterização
+    for item in resultados:
+        if not isinstance(item, dict) or item is None:
+            continue
+    
+        emb = item.get("embedding")
+        if not isinstance(emb, dict):
+            item["embedding"] = {"vectorized_embedding": None}
+        else:
+            emb.setdefault("vectorized_embedding", None)
+            
     def processar_item(item):
         emb = None
         try:
-            emb = (item.get("embedding") or {}).get("vectorized_embedding")
+            emb = item.get("embedding", {}).get("vectorized_embedding")
+            if emb in (None, "", []):
+                return item
         except Exception:
             pass
 
@@ -2868,10 +2903,31 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         # Em alguns casos, uma thread pode retornar None e sobrescrever um item da lista.
         # Isso evita que gerar_embeddings() ou classificar_via_mongo_vector_search() quebrem.
         posts_iniciais = len(resultados)
-        resultados = [r for r in resultados if isinstance(r, dict)]
+
+# Normaliza cada item — evita qualquer NoneType no pipeline
+        normalizados = []
+        for r in resultados:
+            if not isinstance(r, dict) or r is None:
+                normalizados.append({
+                    "transcricao": None,
+                    "framesDescricao": None,
+                    "transcricao_erro": "item_invalido_pos_transcricao",
+                    "caption": "",
+                    "ai_model_data": {},
+                })
+            else:
+                # garantir campos e tipos antes das análises
+                r.setdefault("caption", "")
+                r.setdefault("transcricao", None)
+                r.setdefault("framesDescricao", None)
+                r.setdefault("ai_model_data", {})
+                normalizados.append(r)
+        
+        resultados = normalizados
         filtrados = posts_iniciais - len(resultados)
+        
         if filtrados > 0:
-            tlog(f"[WARN] Removidos {filtrados} itens inválidos (None ou não-dict) após transcrição.")
+            tlog(f"[WARN] Corrigidos {filtrados} itens inválidos após transcrição.")
 
         # ----------------------------
         # 2️⃣.5️ Gerar ANÁLISE GPT para cada post
