@@ -327,17 +327,40 @@ def _extract_tags_and_mentions(caption: str):
 # ─────────────────────────────────────────────────────────────
 class AudioModel:
     """Wrapper mínimo para transcrição usando API do OpenAI (whisper-1)."""
-    def __init__(self, model: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, timeout: int = 60):
         s = get_settings()
         self.model = model or s.OPENAI_TRANSCRIBE_MODEL
+        self.timeout = timeout
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((
+            RateLimitError,
+            APIConnectionError,
+            APITimeoutError,
+        )),
+    )
     def transcribe(self, file_path: str) -> dict:
+        s = Settings()
+        client = OpenAI(api_key = s.OPENAI_API_KEY, timeout=httpx.Timeout(60.0, read=60.0, write=10.0, connect=10.0))
         try:
-            _, client, _ = get_clients()
             with open(file_path, "rb") as f:
-                r = client.audio.transcriptions.create(model=self.model, file=f)
-            return r.model_dump() if hasattr(r, "model_dump") else {"text": getattr(r, "text", None)}
+                r = client.audio.transcriptions.create(
+                    model=self.model,
+                    file=f,
+                    timeout=self.timeout,   # 👈 timeout real da request
+                )
+            return (
+                r.model_dump()
+                if hasattr(r, "model_dump")
+                else {"text": getattr(r, "text", None)}
+            )
+        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+            # deixa o tenacity fazer o retry
+            raise
         except Exception as e:
+            # não fica travado: devolve erro e deixa o worker seguir
             return {"error": str(e)}
 
 def _tipo_midia(path: str) -> str:
@@ -387,13 +410,35 @@ def _build_atempo_chain(speed: float) -> str:
         factors = [1.0]
     return ",".join(f"atempo={f}" for f in factors)
 
-def _run_ffmpeg(cmd_args: list):
-    proc = subprocess.run(
-        cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=90
+def _run_ffmpeg(cmd_args: list, timeout: int = 90):
+    # Inicia o processo em um novo grupo.
+    # Isso permite matar ffmpeg + sub-processos caso ele trave.
+    proc = subprocess.Popen(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid,     # ⭐ crítico (Linux/macOS)
+        start_new_session=True     # ⭐ crítico (compat Windows/Linux)
     )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+
+    except subprocess.TimeoutExpired:
+        # Mata TODO o grupo do ffmpeg
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+
+        raise RuntimeError(f"FFmpeg excedeu timeout de {timeout}s e foi encerrado.")
+
+    # Se não travou: verificar código de retorno
     if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="ignore")
+        err = (stderr or b"").decode("utf-8", errors="ignore")
         raise RuntimeError(f"FFmpeg falhou:\n{err}")
+
+    return stdout, stderr
 
 def _build_post_prompt(post):
     return f"""
@@ -569,6 +614,31 @@ def process_single_post(index, post):
 
     return post
 
+def run_ffmpeg_safe(cmd_args: list, timeout: int = 45):
+    proc = subprocess.Popen(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid,
+        start_new_session=True
+    )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except:
+            pass
+        raise RuntimeError(f"FFmpeg excedeu timeout de {timeout}s e foi encerrado.")
+
+    if proc.returncode != 0:
+        err = (stderr or b"").decode("utf-8", errors="ignore")
+        raise RuntimeError(f"FFmpeg falhou:\n{err}")
+
+    return stdout, stderr
+
 def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     """
     Extrai entre 5 e 15 frames de um vídeo usando FFmpeg, sem decodificar tudo com OpenCV.
@@ -629,7 +699,7 @@ def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
 
     # Ajuste: Roda o subprocesso
     try:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        run_ffmpeg_safe(cmd, timeout=45)
 
         # Lê os frames e converte para base64
         frames_b64: List[str] = []
@@ -764,15 +834,45 @@ def transcrever_video_em_speed(
         except Exception as e:
             tlog(f"[WARN] falha ao remover áudio temporário {Path(wav_path).name}: {e}")
 
+def run_cmd_safe(cmd_args: list, timeout: int = 5):
+    proc = subprocess.Popen(
+        cmd_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid,
+        start_new_session=True
+    )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except:
+            pass
+        raise RuntimeError(f"Comando excedeu timeout de {timeout}s e foi encerrado.")
+
+    return proc.returncode, stdout, stderr
+    
 def _ffprobe_duration_seconds(path: str) -> Optional[float]:
     try:
-        proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+        code, out, err = run_cmd_safe(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path
+            ],
+            timeout=5  # ffprobe deve ser rápido
         )
-        out = proc.stdout.decode("utf-8", errors="ignore").strip()
-        return float(out) if out else None
+
+        if code != 0:
+            return None
+
+        value = out.decode("utf-8", errors="ignore").strip()
+        return float(value) if value else None
+
     except Exception:
         return None
 
@@ -1932,9 +2032,13 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: None):
         # ---------------------------------------------------------------------
         if media_url.startswith("http://") or media_url.startswith("https://"):
             try:
-                resp = requests.get(media_url, timeout=30)
-                resp.raise_for_status()
-                local_path.write_bytes(resp.content)
+                with requests.get(media_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(local_path, "wb") as f:
+                        for chunk in r.iter_content(1024 * 256):
+                            if not chunk:
+                                break
+                            f.write(chunk)
             except Exception as e:
                 return idx, None, [], None, ai_model_data, f"DownloadError: {e}"
 
@@ -2044,10 +2148,10 @@ def anexar_transcricoes_threaded(
     Recursos:
       - Jobs únicos ✔
       - Sem semáforo ✔
-      - Sem GPU singleton ✔
       - Caminhos exclusivos por job (no worker) ✔
       - Timeout no ffmpeg (no worker) ✔
       - Nenhum base64Frames armazenado ✔
+      - Proteções contra NoneType entre etapas ✔
     """
 
     if not resultados:
@@ -2058,9 +2162,8 @@ def anexar_transcricoes_threaded(
         if not isinstance(item, dict):
             tlog(f"[ERRO] resultados[{i}] não é dict dentro do worker. Substituindo por dict vazio.")
             resultados[i] = {}
-
-    # Semáforo removido
-    sem = None
+    # Semáforo removido (mantido só na assinatura)
+    sem = None  # noqa
 
     # ==========================================================
     # 🔹 Criar lista de jobs ÚNICOS (idx, url_midia)
@@ -2103,7 +2206,7 @@ def anexar_transcricoes_threaded(
                 seen.add(key)
                 jobs.append((idx, url_midia))
         else:
-            # falta de mídia
+            # falta de mídia → marca erro, mas não quebra pipeline
             if item.get("transcricao") is None and item.get("framesDescricao") is None:
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
@@ -2128,43 +2231,65 @@ def anexar_transcricoes_threaded(
             for idx, url in jobs
         ]
 
-        for fut in as_completed(futs):
-
-            (
-                idx,
-                transcricao,
-                frames,
-                frames_desc,
-                ai_model_data,
-                erro,
-            ) = fut.result()
+        for fut in as_completed(futs, timeout=100):
+            try:
+                (
+                    idx,
+                    transcricao,
+                    frames,
+                    frames_desc,
+                    ai_model_data,
+                    erro,
+                ) = fut.result()
+            except TimeoutError:
+                tlog("[ERRO] Uma thread travou! Cancelando executor.")
+                for f in futs:
+                    f.cancel()
+                break
+            except Exception as e:
+                tlog(f"[TR] [ERRO] Worker explodiu: {e}")
+                continue
 
             # 🔒 SLAM DUNK PROTECTION: impede que idx inválido cause NoneType
-            if idx is None or idx < 0 or idx >= len(resultados) or resultados[idx] is None:
-                tlog(f"[ERRO] Worker retornou idx inválido ou item None: idx={idx}")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
+                tlog(f"[ERRO] Worker retornou idx inválido: idx={idx}")
                 continue
+
+            item = resultados[idx]
+            if not isinstance(item, dict):
+                tlog(f"[ERRO] resultados[{idx}] corrompido (não-dict). Recriando estrutura mínima.")
+                resultados[idx] = {
+                    "transcricao": None,
+                    "framesDescricao": None,
+                    "transcricao_erro": "item_corrompido",
+                    "ai_model_data": {},
+                    "base64Frames": [],
+                }
+                item = resultados[idx]
 
             # ----------------------------
             # preencher resultados[idx]
             # ----------------------------
             if transcricao is not None:
-                resultados[idx]["transcricao"] = transcricao
+                item["transcricao"] = transcricao
 
             # não guardamos base64Frames (memory-safe)
             if frames_desc is not None:
-                resultados[idx]["framesDescricao"] = frames_desc
+                item["framesDescricao"] = frames_desc
 
-            resultados[idx]["ai_model_data"] = ai_model_data or {
+            item["ai_model_data"] = ai_model_data or {
                 "ai_model": "gpt-5-nano",
                 "input_tokens": None,
                 "output_tokens": None,
                 "audio_seconds": None,
+                "num_images": 0,
+                "estimated_image_tokens": 0,
             }
 
             if erro:
-                resultados[idx]["transcricao_erro"] = erro
+                item["transcricao_erro"] = erro
             else:
-                resultados[idx].pop("transcricao_erro", None)
+                item.pop("transcricao_erro", None)
 
             # ----------------------------
             # progresso do callback
@@ -2181,7 +2306,7 @@ def anexar_transcricoes_threaded(
     # ==========================================================
     for i in range(len(resultados)):
         item = resultados[i]
-    
+
         # Se o item não é dict, cria um dict mínimo e normaliza
         if not isinstance(item, dict):
             tlog(f"[ERRO] resultados[{i}] inválido (None/não-dict). Normalizando para estrutura mínima.")
@@ -2193,25 +2318,25 @@ def anexar_transcricoes_threaded(
                 "base64Frames": [],
             }
             continue
-    
+
         # Campos básicos
         item.setdefault("transcricao", None)
         item.setdefault("framesDescricao", None)
         item.setdefault("transcricao_erro", None)
-    
+
         # Força base64Frames como lista vazia (zero RAM)
         bf = item.get("base64Frames")
         if not isinstance(bf, list) or bf:
             tlog(f"[WARN] resultados[{i}].base64Frames estava preenchido ou inválido. Resetando para [].")
             item["base64Frames"] = []
-    
+
         # ai_model_data robusto
         amd = item.get("ai_model_data")
         if amd is None or not isinstance(amd, dict):
             tlog(f"[WARN] resultados[{i}].ai_model_data inválido ({type(amd)}). Recriando dict vazio.")
             amd = {}
             item["ai_model_data"] = amd
-    
+
         # Normalização do conteúdo interno
         amd.setdefault("ai_model", "gpt-5-nano")
         amd.setdefault("input_tokens", None)
@@ -2219,6 +2344,7 @@ def anexar_transcricoes_threaded(
         amd.setdefault("audio_seconds", None)
         amd.setdefault("num_images", 0)
         amd.setdefault("estimated_image_tokens", 0)
+
     return resultados
 
 def anexar_analises_threaded(
@@ -2241,17 +2367,9 @@ def anexar_analises_threaded(
     # Garantir dicts válidos
     # ==========================
     for i, item in enumerate(resultados):
-        if not isinstance(item, dict) or item is None:
-            resultados[i] = {
-                "caption": "",
-                "transcricao": "",
-                "framesDescricao": "",
-                "_from_mongo": False,
-            }
-        else:
-            item.setdefault("caption", "")
-            item.setdefault("transcricao", "")
-            item.setdefault("framesDescricao", "")
+        if not isinstance(item, dict):
+            tlog(f"[ANALISE] [ERRO] resultados[{i}] não é dict. Substituindo por dict vazio.")
+            resultados[i] = {}
 
     # ==========================
     # Selecionar jobs a analisar
@@ -2293,7 +2411,13 @@ def anexar_analises_threaded(
     # Worker executado em threads
     # ==========================
     def _thread_analise(idx: int):
+        if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
+            return idx, None, 0, "idx_invalido"
+
         item = resultados[idx]
+        if not isinstance(item, dict):
+            return idx, None, 0, "item_invalido"
+
         row = {
             "ownerUsername": item.get("ownerUsername") or item.get("creatorname") or "",
             "caption": item.get("caption") or "",
@@ -2320,13 +2444,26 @@ def anexar_analises_threaded(
         futures = [ex.submit(_thread_analise, idx) for idx in jobs]
 
         for fut in as_completed(futures):
-            idx, texto, tokens, erro = fut.result()
+            try:
+                idx, texto, tokens, erro = fut.result()
+            except Exception as e:
+                tlog(f"[ANALISE] [ERRO] Worker explodiu: {e}")
+                continue
 
-            if idx is None or idx < 0 or idx >= len(resultados) or resultados[idx] is None:
+            if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
                 tlog(f"[ANALISE] [ERRO] Worker retornou idx inválido ou item None: idx={idx}")
                 continue
 
             item = resultados[idx]
+            if not isinstance(item, dict):
+                tlog(f"[ANALISE] [ERRO] resultados[{idx}] virou None ou não-dict. Normalizando.")
+                resultados[idx] = {
+                    "analise": None,
+                    "analise_tokens": 0,
+                    "analise_erro": "item_invalido",
+                }
+                item = resultados[idx]
+
             item["analise"] = texto
             item["analise_tokens"] = tokens
             item["analise_erro"] = erro
@@ -2365,17 +2502,15 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
 
     batch_size: número máximo de textos por chamada à API (100 recomendado)
     """
-    # sanitização extrema — remove ou normaliza qualquer item inválido
-    for i, item in enumerate(resultados):
-        if not isinstance(item, dict) or item is None:
-            resultados[i] = {"caption": "", "transcricao": "", "framesDescricao": ""}
-            continue
-    
-        item.setdefault("caption", "")
-        item.setdefault("transcricao", "")
-        item.setdefault("framesDescricao", "")
+
     if not resultados:
         return resultados
+
+    # Normaliza itens inválidos
+    for i, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            tlog(f"[EMBEDDINGS] resultados[{i}] inválido (None/não-dict). Normalizando.")
+            resultados[i] = {"embedding": None}
 
     _, client, _ = get_clients()
 
@@ -2389,24 +2524,21 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
     textos = []
     idx_map = [] # mapeia índice original → posição no batch
     for i, item in enumerate(resultados):
+        if not isinstance(item, dict):
+            resultados[i] = {"embedding": None}
+            continue
+
         caption = item.get("caption") or ""
         transcricao = item.get("transcricao") or ""
         frames = item.get("framesDescricao") or ""
 
-        texto = f"{caption} {transcricao} {frames}".strip()
+        texto = f"caption: {caption} transcricao: {transcricao} frames: {frames}"
         texto = limpar_texto(texto)
-        
-        if not texto:
-            item["embedding"] = {
-                "vectorized_embedding": None,
-                "embedding_provider": "openai",
-                "embedding_model": model,
-                "error": "texto_vazio"
-            }
-            continue
-        
-        textos.append(texto)
-        idx_map.append(i)
+        if texto:
+            textos.append(texto)
+            idx_map.append(i)
+        else:
+            item["embedding"] = None  # sem texto para vetorializar
 
     if not textos:
         return resultados
@@ -2421,8 +2553,11 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
             resp = client.embeddings.create(model=model, input=batch)
             embeddings = [d.embedding for d in resp.data]
 
-            for i, emb in zip(idxs, embeddings):
-                resultados[i]["embedding"] = {
+            for i_idx, emb in zip(idxs, embeddings):
+                if i_idx < 0 or i_idx >= len(resultados) or not isinstance(resultados[i_idx], dict):
+                    tlog(f"[EMBEDDINGS] Índice corrompido {i_idx}. Ignorando embedding.")
+                    continue
+                resultados[i_idx]["embedding"] = {
                     "vectorized_embedding": emb,
                     "embedding_provider": "openai",
                     "embedding_model": model,
@@ -2430,8 +2565,10 @@ def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-smal
 
         except Exception as e:
             # Em caso de erro no batch, marca todos os itens afetados
-            for i in idxs:
-                resultados[i]["embedding"] = {
+            for i_idx in idxs:
+                if i_idx < 0 or i_idx >= len(resultados) or not isinstance(resultados[i_idx], dict):
+                    continue
+                resultados[i_idx]["embedding"] = {
                     "vectorized_embedding": None,
                     "embedding_provider": "openai",
                     "embedding_model": model,
@@ -2600,23 +2737,11 @@ def classificar_via_mongo_vector_search(resultados, k=5, max_workers=max_workers
     Classifica cada item via MongoDB Atlas Vector Search (sem cache),
     garantindo segurança de tipos e compatibilidade com numpy arrays.
     """
-    # Garantia de tipo antes da clusterização
-    for item in resultados:
-        if not isinstance(item, dict) or item is None:
-            continue
-    
-        emb = item.get("embedding")
-        if not isinstance(emb, dict):
-            item["embedding"] = {"vectorized_embedding": None}
-        else:
-            emb.setdefault("vectorized_embedding", None)
-            
+
     def processar_item(item):
         emb = None
         try:
-            emb = item.get("embedding", {}).get("vectorized_embedding")
-            if emb in (None, "", []):
-                return item
+            emb = (item.get("embedding") or {}).get("vectorized_embedding")
         except Exception:
             pass
 
@@ -2903,31 +3028,10 @@ async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
         # Em alguns casos, uma thread pode retornar None e sobrescrever um item da lista.
         # Isso evita que gerar_embeddings() ou classificar_via_mongo_vector_search() quebrem.
         posts_iniciais = len(resultados)
-
-# Normaliza cada item — evita qualquer NoneType no pipeline
-        normalizados = []
-        for r in resultados:
-            if not isinstance(r, dict) or r is None:
-                normalizados.append({
-                    "transcricao": None,
-                    "framesDescricao": None,
-                    "transcricao_erro": "item_invalido_pos_transcricao",
-                    "caption": "",
-                    "ai_model_data": {},
-                })
-            else:
-                # garantir campos e tipos antes das análises
-                r.setdefault("caption", "")
-                r.setdefault("transcricao", None)
-                r.setdefault("framesDescricao", None)
-                r.setdefault("ai_model_data", {})
-                normalizados.append(r)
-        
-        resultados = normalizados
+        resultados = [r for r in resultados if isinstance(r, dict)]
         filtrados = posts_iniciais - len(resultados)
-        
         if filtrados > 0:
-            tlog(f"[WARN] Corrigidos {filtrados} itens inválidos após transcrição.")
+            tlog(f"[WARN] Removidos {filtrados} itens inválidos (None ou não-dict) após transcrição.")
 
         # ----------------------------
         # 2️⃣.5️ Gerar ANÁLISE GPT para cada post
