@@ -10,7 +10,7 @@ import os
 import pandas as pd
 import numpy as np
 
-from funcs2 import rodar_pipeline, _upload_para_mongo, upload_muitos_para_mongo  # suas funções
+from funcs2 import rodar_pipeline  # upload agora é feito dentro do pipeline
 
 # ----------------------------
 # Configurações de domínios válidos
@@ -80,71 +80,41 @@ def _ensure_urls(obj: Union[str, Iterable[str]]) -> List[str]:
 # ----------------------------
 # Execução assíncrona
 # ----------------------------
-def _run_async_pipeline(urls: List[str], progress_callback=None):
+def _run_async_pipeline(urls: List[str], run_analysis: bool = True, progress_callback=None):
     try:
         import platform
         if platform.system() == "Windows":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore
     except Exception:
         pass
-    return asyncio.run(rodar_pipeline(urls, progress_callback=progress_callback))
+    return asyncio.run(rodar_pipeline(urls, run_analysis=run_analysis, progress_callback=progress_callback))
 
 # ----------------------------
-# Sanitização dos resultados (apenas para upload)
+# Preparação para Excel
 # ----------------------------
-def _sanitize_items(resultados):
+def _prepare_items_for_excel(resultados):
+    """
+    Filtra e limpa os itens para exportação Excel.
+    (O upload já foi feito individualmente no pipeline)
+    """
     campos_excluir = {"mediaLocalPaths", "mediaLocalPath", "base64Frames", "mediaUrl"}
-    itens_sanitizados = []
-    itens_para_upload = []
+    itens_para_excel = []
 
     for r in resultados:
+        # Copia e remove campos pesados/internos
         item = {k: v for k, v in r.items() if k not in campos_excluir}
-        itens_sanitizados.append(item)
+        
+        # Remove vetor de embedding para o Excel (fica muito grande)
+        if isinstance(item.get("embedding"), dict):
+            item["embedding"] = dict(item["embedding"])
+            item["embedding"].pop("vectorized_embedding", None)
+            
+        # Remove outros campos pesados se necessário
+        item.pop("audio_snapshot", None)
+        
+        itens_para_excel.append(item)
 
-        erro = r.get("transcricao_erro")
-
-        if not erro:  # None, "", False → OK para upload
-            item_para_upload = {
-                k: r.get(k)
-                for k in [
-                    "url",
-                    "ownerUsername",
-                    "caption",
-                    "type",
-                    "likesCount",
-                    "commentsCount",
-                    "videoPlayCount",
-                    "videoViewCount",
-                    "transcricao",
-                    "framesDescricao",
-                    "audio_id",
-                    "audio_snapshot",
-                    "hashtags",
-                    "mentions",
-                    "ai_model_data",
-                    "embedding",
-                    "categoria_principal",
-                    "subcategoria",
-                    "comunidade_predita",
-                    "comunidades_proporcoes",
-                    "analise",
-                    "analise_tokens",
-                    "analise_erro"
-                ]
-            }
-            item_para_upload["post_timestamp"] = r.get("timestamp") or r.get("post_timestamp")
-            item_para_upload["upload_timestamp"] = datetime.now()
-            itens_para_upload.append(item_para_upload)
-        else:
-            print(f"[UPLOAD] Ignorando item com erro: {erro!r}")
-
-        # Impressão JSON (debug)
-        try:
-            print(json.dumps(item, ensure_ascii=False, indent=2))
-        except Exception:
-            print(str(item))
-
-    return itens_sanitizados, itens_para_upload
+    return itens_para_excel
     
 # ----------------------------
 # Exportação para XLSX
@@ -165,11 +135,12 @@ def _to_xlsx_bytes(df: pd.DataFrame) -> Tuple[bytes, str]:
 # ----------------------------
 # Função principal
 # ----------------------------
-def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
+def main(urls_or_text: Union[str, Iterable[str]], run_analysis: bool = True, progress_callback=None):
     """
     Aceita:
       - string com 'uma URL por linha'
       - lista/iterável de URLs
+      - run_analysis: se True, executa análise GPT
 
     Retorna:
       - dict com chaves:
@@ -177,7 +148,7 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
           'xlsx_bytes'    -> bytes do arquivo .xlsx
           'xlsx_name'     -> nome sugerido do arquivo
           'n_urls'        -> int
-          'n_items_upload'-> int
+          'n_items_upload'-> int (neste fluxo, itens processados com sucesso)
     """
     urls = _ensure_urls(urls_or_text)
     if not urls:
@@ -187,7 +158,7 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
     print("Exemplos:", urls[:3])
 
     try:
-        resultados = _run_async_pipeline(urls, progress_callback=progress_callback)
+        resultados = _run_async_pipeline(urls, run_analysis=run_analysis, progress_callback=progress_callback)
     except Exception as e:
         print(f"[ERRO] Falha ao executar pipeline: {type(e).__name__}: {e}")
         return {
@@ -208,29 +179,10 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
             "n_items_upload": 0,
         }
 
-    itens_sanitizados, itens_para_upload = _sanitize_items(resultados)
+    # Prepara para Excel
+    itens_para_excel = _prepare_items_for_excel(resultados)
 
-    # ✅ Primeiro envia ao Mongo — preservando o vectorized_embedding
-    try:
-        if len(itens_para_upload) > 1:
-            upload_muitos_para_mongo(itens_para_upload)
-        elif len(itens_para_upload) == 1:
-            _upload_para_mongo(itens_para_upload[0])
-    except Exception as e:
-        print(f"[Aviso] Falha no upload para Mongo: {e}")
-
-    # ✅ Agora cria uma cópia para exportar no Excel (sem vectorized_embedding)
-    itens_para_excel = []
-    for r in itens_para_upload:
-        copia = dict(r)  # cópia rasa
-        copia.pop("audio_id", None)
-        copia.pop("audio_snapshot", None)
-        if isinstance(copia.get("embedding"), dict):
-            copia["embedding"] = dict(copia["embedding"])  # cópia da embedding
-            copia["embedding"].pop("vectorized_embedding", None)
-        itens_para_excel.append(copia)
-
-    # DataFrame baseado na cópia (sem vectorized_embedding)
+    # DataFrame
     df = pd.DataFrame(itens_para_excel)
     if not df.empty:
         df = df.drop(columns=["_from_mongo"], errors="ignore")
@@ -243,15 +195,11 @@ def main(urls_or_text: Union[str, Iterable[str]], progress_callback=None):
         "xlsx_bytes": xlsx_bytes,
         "xlsx_name": xlsx_name,
         "n_urls": len(urls),
-        "n_items_upload": len(itens_para_upload),
+        "n_items_upload": len(itens_para_excel),
     }
 
 # ----------------------------
 # Execução direta (opcional)
 # ----------------------------
 if __name__ == "__main__":
-    print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB.")
-
-
-
-
+    print("Este módulo agora gera um arquivo .xlsx e envia os dados para o MongoDB (via pipeline).")
