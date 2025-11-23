@@ -21,6 +21,7 @@ from urllib.parse import urlparse, urlunparse, urlsplit, unquote
 from tempfile import TemporaryDirectory, mkdtemp
 import numpy as np
 
+import gc
 import pydantic; print(pydantic.__version__) # debug: mostra versão do pydantic
 import pandas as pd
 import requests
@@ -41,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 import hashlib
 import logging
+import psutil
 
 # OpenAI (cliente moderno)
 from openai import OpenAI, AsyncOpenAI, RateLimitError, APIConnectionError, APITimeoutError
@@ -342,25 +344,34 @@ class AudioModel:
         )),
     )
     def transcribe(self, file_path: str) -> dict:
-        s = Settings()
-        client = OpenAI(api_key = s.OPENAI_API_KEY, timeout=httpx.Timeout(60.0, read=60.0, write=10.0, connect=10.0))
+        s = get_settings()
+        client = OpenAI(api_key=s.OPENAI_API_KEY, timeout=60)
+    
         try:
             with open(file_path, "rb") as f:
                 r = client.audio.transcriptions.create(
                     model=self.model,
-                    file=f,
-                    timeout=self.timeout,   # 👈 timeout real da request
+                    file=f
                 )
-            return (
+    
+            # Converte para dict
+            out = (
                 r.model_dump()
                 if hasattr(r, "model_dump")
                 else {"text": getattr(r, "text", None)}
             )
-        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
-            # deixa o tenacity fazer o retry
-            raise
+    
+            return out
+    
+        except (RateLimitError, APIConnectionError, APITimeoutError):
+            raise  # deixa retry lidar
+    
         except Exception as e:
-            # não fica travado: devolve erro e deixa o worker seguir
+            # Loga o erro retornado
+            try:
+                tlog(f"[TRANSCRIBE] ERRO: {e}")
+            except:
+                pass
             return {"error": str(e)}
 
 def _tipo_midia(path: str) -> str:
@@ -417,7 +428,6 @@ def _run_ffmpeg(cmd_args: list, timeout: int = 90):
         cmd_args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,     # ⭐ crítico (Linux/macOS)
         start_new_session=True     # ⭐ crítico (compat Windows/Linux)
     )
 
@@ -619,7 +629,6 @@ def run_ffmpeg_safe(cmd_args: list, timeout: int = 45):
         cmd_args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
         start_new_session=True
     )
 
@@ -639,6 +648,19 @@ def run_ffmpeg_safe(cmd_args: list, timeout: int = 45):
 
     return stdout, stderr
 
+def _kill_all_ffmpeg():
+    """Mata qualquer processo ffmpeg ainda vivo — evita OOM e travamentos."""
+    try:
+        for p in psutil.process_iter(['pid', 'name']):
+            if 'ffmpeg' in (p.info['name'] or '').lower():
+                try:
+                    p.kill()
+                    tlog(f"[CLEANUP] 🪓 ffmpeg morto (pid={p.pid})")
+                except Exception:
+                    pass
+    except Exception as e:
+        tlog(f"[WARN] Falha ao buscar/matar ffmpeg: {e}")
+
 def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     """
     Extrai entre 5 e 15 frames de um vídeo usando FFmpeg, sem decodificar tudo com OpenCV.
@@ -649,21 +671,27 @@ def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Arquivo de vídeo não encontrado: {path}")
 
-    # Determina a duração e o FPS
+      # Determina a duração e FPS usando ffprobe protegido
     try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=duration,nb_frames,r_frame_rate",
-                "-of", "json", path
-            ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
-        )
-        info = json.loads(proc.stdout.decode("utf-8", errors="ignore"))
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=duration,nb_frames,r_frame_rate",
+            "-of", "json",
+            str(path)
+        ]
+    
+        stdout, stderr = run_ffmpeg_safe(cmd, timeout=45)
+        info = json.loads(stdout.decode("utf-8", errors="ignore"))
+    
         stream = (info.get("streams") or [{}])[0]
+    
         duration = float(stream.get("duration", 0))
-    except Exception:
+        if duration <= 0:
+            log("[WARN] ffprobe retornou duração <= 0")
+    
+    except Exception as e:
+        log(f"[ERROR] ffprobe falhou: {e}")
         duration = 0
 
     # Decide quantos frames pegar
@@ -692,7 +720,7 @@ def get_video_frames(path: str, every_nth: Optional[int] = None) -> List[str]:
         "-hide_banner", "-loglevel", "error",
         "-y",
         "-i", path,
-        "-vf", "fps=1",
+        "-vf", f"fps=1/{interval}",
         "-q:v", "3",
         pattern
     ]
@@ -769,20 +797,13 @@ def _audio_temp_speed_from_video_ffmpeg(
 
     cmd += [str(out_wav)]
 
-    # 🔹 Executa ffmpeg com timeout
+    # 🔹 Executa ffmpeg com timeout usando wrapper seguro
     try:
-        subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-            timeout=timeout
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"ffmpeg excedeu timeout de {timeout}s")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"ffmpeg falhou: {e.stderr.decode(errors='ignore')}")
-
+        stdout, stderr = run_ffmpeg_safe(cmd, timeout=timeout)
+    except RuntimeError as e:
+        # repassa exceção já formatada pelo wrapper
+        raise RuntimeError(f"ffmpeg erro: {e}")
+    
     return str(tmpdir), str(out_wav)
 
 def transcrever_video_em_speed(
@@ -830,7 +851,6 @@ def transcrever_video_em_speed(
         # Limpeza do WAV gerado
         try:
             Path(wav_path).unlink(missing_ok=True)
-            tlog(f"[LIMPEZA ÁUDIO] 🗑️ {Path(wav_path).name} removido após transcrição")
         except Exception as e:
             tlog(f"[WARN] falha ao remover áudio temporário {Path(wav_path).name}: {e}")
 
@@ -839,7 +859,6 @@ def run_cmd_safe(cmd_args: list, timeout: int = 5):
         cmd_args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
         start_new_session=True
     )
 
@@ -1988,19 +2007,27 @@ def _descrever_frames(frames_b64: List[str], max_imgs: int = 5, idioma: str = "p
 # ─────────────────────────────────────────────────────────────
 # Transcrição em paralelo (threads) + descrição de frames
 # ─────────────────────────────────────────────────────────────
-def _thread_worker(idx: int, media_url: Optional[str], sem: None):
+def _thread_worker(idx: int, media_url: Optional[str]):
     """
     Worker de processamento de vídeo/imagem:
-      - Baixa a mídia para um caminho único TEMPORÁRIO por job (evita corrida)
-      - Transcreve áudio (com timeout dentro de transcrever_video_em_speed)
-      - Extrai frames
-      - Descreve frames
-      - Remove o arquivo local no final (sem conflito entre threads)
-
-    Retorna:
-      (idx, transcricao:str|None, base64Frames:list[str],
-       framesDescricao:str|None, ai_model_data:dict, erro:str|None)
+        - Cria arquivo temporário exclusivo por job
+        - Baixa mídia ou copia arquivo local
+        - Transcreve (se vídeo)
+        - Extrai e descreve frames
+        - Retorna sempre 5 valores (idx, transcricao, frames_descricao, ai_model_data, erro)
+        - Remove arquivo temporário ao final
     """
+
+    from uuid import uuid4
+    import tempfile
+
+    # -------------------------
+    # Estrutura padrão retornada
+    # -------------------------
+    transcricao = None
+    frames_descricao = None
+    erro = None
+
     ai_model_data = {
         "ai_model": "gpt-5-nano",
         "input_tokens": None,
@@ -2010,132 +2037,150 @@ def _thread_worker(idx: int, media_url: Optional[str], sem: None):
         "estimated_image_tokens": 0,
     }
 
-    local_path = Path()  # definido aqui para o finally
-
+    # Caso sem URL
     if not media_url:
-        return idx, None, [], None, ai_model_data, "sem_media_url"
+        return idx, None, None, ai_model_data, "sem_media_url"
 
+    # -------------------------
+    # Cria arquivo temporário único
+    # -------------------------
     try:
-        # ---------------------------------------------------------------------
-        # 🔹 Caminho TEMPORÁRIO único por job (correto; sem corrida entre threads)
-        # ---------------------------------------------------------------------
-        from uuid import uuid4
-        import tempfile
-
         suffix = Path(media_url).suffix or ".mp4"
         fd, tmpname = tempfile.mkstemp(prefix=f"job_{uuid4().hex}_", suffix=suffix)
         os.close(fd)
         local_path = Path(tmpname)
+    except Exception as e:
+        return idx, None, None, ai_model_data, f"TempFileError: {e}"
 
-        # ---------------------------------------------------------------------
-        # 🔹 Baixar a mídia (se for URL)
-        # ---------------------------------------------------------------------
-        if media_url.startswith("http://") or media_url.startswith("https://"):
+    try:
+        # =====================================================
+        # DEADMAN TIMER — impede travamento silencioso do worker
+        # =====================================================
+        inicio = time.time()
+        WORKER_TIMEOUT = 120  # 2 minutos – ajuste se quiser
+
+        def check_timeout():
+            if time.time() - inicio > WORKER_TIMEOUT:
+                raise RuntimeError("WorkerTimeout: excedeu tempo máximo dentro do worker")
+
+        # faça uma checagem inicial
+        check_timeout()
+        
+        # =====================================================
+        # -------------------------
+        # Baixar ou copiar o arquivo
+        # -------------------------
+        if media_url.startswith(("http://", "https://")):
             try:
                 with requests.get(media_url, stream=True, timeout=30) as r:
                     r.raise_for_status()
                     with open(local_path, "wb") as f:
-                        for chunk in r.iter_content(1024 * 256):
-                            if not chunk:
-                                break
-                            f.write(chunk)
+                        for chunk in r.iter_content(256 * 1024):
+                            if chunk:
+                                f.write(chunk)
             except Exception as e:
-                return idx, None, [], None, ai_model_data, f"DownloadError: {e}"
+                return idx, None, None, ai_model_data, f"DownloadError: {e}"
 
-        # ---------------------------------------------------------------------
-        # 🔹 Se não for URL, copiar o arquivo local para o temp exclusivo
-        # ---------------------------------------------------------------------
         else:
-            original = Path(media_url)
-            if not original.exists():
-                return idx, None, [], None, ai_model_data, f"FileNotFoundError: {original.name}"
-            local_path.write_bytes(original.read_bytes())
+            src = Path(media_url)
+            if not src.exists():
+                return idx, None, None, ai_model_data, "FileNotFoundError"
+            local_path.write_bytes(src.read_bytes())
+            check_timeout()
 
-        # ---------------------------------------------------------------------
-        # 🔹 Detecta tipo
-        # ---------------------------------------------------------------------
+        # -------------------------
+        # Determinar tipo da mídia
+        # -------------------------
         ext = local_path.suffix.lower()
         is_video = ext in {".mp4", ".mov", ".m4v", ".webm", ".ts", ".mkv", ".avi"}
         is_image = ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+        
+        # fallback com detector robusto
+        if not (is_video or is_image):
+            tipo = _tipo_midia(str(local_path))
+            is_video = tipo == "video"
+            is_image = tipo == "image"
+        
+        # fallback usando heurística interna
+        if not (is_video or is_image):
+            tipo = _tipo_midia(str(local_path))
+            is_video = tipo == "video"
+            is_image = tipo == "image"
 
-        if not is_video and not is_image:
-            kind = _tipo_midia(str(local_path))
-            is_video = (kind == "video")
-            is_image = (kind == "image")
-
-        texto = None
-        base64_frames = []
-        frames_descricao = None
-
-        # ---------------------------------------------------------------------
-        # 🔹 PROCESSAMENTO DE VÍDEO
-        # ---------------------------------------------------------------------
+        # =====================================================================
+        # PROCESSAMENTO DE VÍDEO
+        # =====================================================================
         if is_video:
-            tlog(f"[TR] 🎙️ idx={idx}: processando vídeo {local_path.name}")
+            # 🔹 Transcrição
+            try:
+                check_timeout()
+                transcricao, dur_s = transcrever_video_em_speed(str(local_path))
+                check_timeout()
+                ai_model_data["audio_seconds"] = dur_s
+            except Exception as e:
+                return idx, None, None, ai_model_data, f"TranscricaoVideoError: {e}"
 
-            texto_resp, dur_s = transcrever_video_em_speed(str(local_path))
-            texto = texto_resp
-            ai_model_data["audio_seconds"] = dur_s
+            # 🔹 Frames
+            try:
+                check_timeout()
+                frames_b64 = get_video_frames(str(local_path))
+                check_timeout()
+            except Exception as e:
+                return idx, transcricao, None, ai_model_data, f"FramesError: {e}"
 
-            # Frames do vídeo
-            base64_frames = get_video_frames(str(local_path))
+            # 🔹 Descrição dos frames
+            if frames_b64:
+                try:
+                    dyn_max = max(3, min(15, int((dur_s or 0) / 6) or 3))
+                    check_timeout()
+                    desc, in_tok, out_tok, num_imgs, est_tokens = _descrever_frames(frames_b64, max_imgs=dyn_max)
+                    check_timeout()
 
-            # Descrição dos frames
-            if base64_frames:
-                secs = dur_s or 0
-                dyn_max_imgs = max(3, min(15, int(round(secs / 6)) or 1))
+                    frames_descricao = desc
+                    ai_model_data["input_tokens"] = in_tok
+                    ai_model_data["output_tokens"] = out_tok
+                    ai_model_data["num_images"] = num_imgs
+                    ai_model_data["estimated_image_tokens"] = est_tokens
+                except Exception as e:
+                    return idx, transcricao, None, ai_model_data, f"DescribeFramesError: {e}"
 
-                desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
-                    base64_frames, max_imgs=dyn_max_imgs
-                )
+        # =====================================================================
+        # PROCESSAMENTO DE IMAGEM
+        # =====================================================================
+        elif is_image:
+            try:
+                b64 = base64.b64encode(local_path.read_bytes()).decode("utf-8")
+                desc, in_tok, out_tok, num_imgs, est_tokens = _descrever_frames([b64], max_imgs=1)
 
                 frames_descricao = desc
                 ai_model_data["input_tokens"] = in_tok
                 ai_model_data["output_tokens"] = out_tok
                 ai_model_data["num_images"] = num_imgs
-                ai_model_data["estimated_image_tokens"] = est_img_tokens
+                ai_model_data["estimated_image_tokens"] = est_tokens
+            except Exception as e:
+                return idx, None, None, ai_model_data, f"ImageDescribeError: {e}"
 
-            tlog(f"[TR] ✅ idx={idx}: concluído {local_path.name}")
+        else:
+            return idx, None, None, ai_model_data, "tipo_midia_desconhecido"
 
-        # ---------------------------------------------------------------------
-        # 🔹 PROCESSAMENTO DE IMAGEM
-        # ---------------------------------------------------------------------
-        elif is_image:
-            tlog(f"[TR] 🖼️ idx={idx}: processando imagem {local_path.name}")
-
-            with local_path.open("rb") as img:
-                base64_frames = [base64.b64encode(img.read()).decode("utf-8")]
-
-            desc, in_tok, out_tok, num_imgs, est_img_tokens = _descrever_frames(
-                base64_frames, max_imgs=1
-            )
-
-            frames_descricao = desc
-            ai_model_data["input_tokens"] = in_tok
-            ai_model_data["output_tokens"] = out_tok
-            ai_model_data["num_images"] = num_imgs
-            ai_model_data["estimated_image_tokens"] = est_img_tokens
-
-            tlog(f"[TR] ✅ idx={idx}: concluído {local_path.name}")
-
-        # ---------------------------------------------------------------------
-        # 🔹 RETORNO PADRÃO
-        # ---------------------------------------------------------------------
-        return idx, texto, base64_frames, frames_descricao, ai_model_data, None
+        # -------------------------
+        # RETORNO FINAL PADRÃO
+        # -------------------------
+        return idx, transcricao, frames_descricao, ai_model_data, None
 
     except Exception as e:
-        return idx, None, [], None, ai_model_data, f"{type(e).__name__}: {e}"
+        # fallback de segurança
+        return idx, None, None, ai_model_data, f"WorkerError: {e}"
 
     finally:
-        # ---------------------------------------------------------------------
-        # ♻️ LIMPEZA (segura — arquivo é exclusivo deste job)
-        # ---------------------------------------------------------------------
+        # -------------------------
+        # LIMPEZA DO TEMPORÁRIO
+        # -------------------------
         try:
-            if local_path.is_file():
+            if local_path.exists():
                 local_path.unlink(missing_ok=True)
-                tlog(f"[LIMPEZA] 🗑️ {local_path.name} removido")
         except Exception as e:
-            tlog(f"[WARN] falha ao remover {local_path.name}: {e}")
+            tlog(f"[WARN] Falha ao remover temp {local_path}: {e}")
 
 def anexar_transcricoes_threaded(
     resultados: List[Dict[str, Any]],
@@ -2146,54 +2191,56 @@ def anexar_transcricoes_threaded(
     """
     Para cada item com mídia, processa vídeo/imagem em paralelo (ThreadPool).
     Recursos:
-      - Jobs únicos ✔
-      - Sem semáforo ✔
-      - Caminhos exclusivos por job (no worker) ✔
-      - Timeout no ffmpeg (no worker) ✔
-      - Nenhum base64Frames armazenado ✔
-      - Proteções contra NoneType entre etapas ✔
+      - Jobs únicos
+      - Caminhos exclusivos por job
+      - Timeout global da etapa
+      - Timeout por worker
+      - Nenhuma base64 armazenada
+      - Worker sempre retorna (idx, transcricao, frames, ai_data, erro)
     """
 
     if not resultados:
         return resultados
 
-    # Garantir que todos os itens são dicts válidos
+    # ----------------------------------------------------------------------
+    # 🔹 Garantir que todos os itens são dicts válidos
+    # ----------------------------------------------------------------------
     for i, item in enumerate(resultados):
         if not isinstance(item, dict):
-            tlog(f"[ERRO] resultados[{i}] não é dict dentro do worker. Substituindo por dict vazio.")
+            tlog(f"[ERRO] resultados[{i}] não é dict. Substituindo por dict vazio.")
             resultados[i] = {}
-    # Semáforo removido (mantido só na assinatura)
-    sem = None  # noqa
 
-    # ==========================================================
-    # 🔹 Criar lista de jobs ÚNICOS (idx, url_midia)
-    # ==========================================================
+    # ----------------------------------------------------------------------
+    # 🔹 Criar lista de jobs únicos (idx, url)
+    # ----------------------------------------------------------------------
     jobs: List[Tuple[int, Optional[str]]] = []
-    seen = set()   # evita duplicatas
+    seen = set()
 
     for idx, item in enumerate(resultados):
         veio_mongo = bool(item.get("_from_mongo"))
 
-        # garante estrutura do modelo
-        item.setdefault("ai_model_data", {
-            "ai_model": "gpt-5-nano",
-            "input_tokens": None,
-            "output_tokens": None,
-            "audio_seconds": None,
-            "num_images": 0,
-            "estimated_image_tokens": 0,
-        })
+        # garantir estrutura de ai_model_data
+        item.setdefault(
+            "ai_model_data",
+            {
+                "ai_model": "gpt-5-nano",
+                "input_tokens": None,
+                "output_tokens": None,
+                "audio_seconds": None,
+                "num_images": 0,
+                "estimated_image_tokens": 0,
+            },
+        )
 
         item.setdefault("base64Frames", [])
 
-        # Se veio do mongo e já tem dados, pula
+        # pular itens vindos do mongo com dados
         if veio_mongo and (
             item.get("transcricao") is not None
             or item.get("framesDescricao") is not None
         ):
             continue
 
-        # Pega URL/mídia local
         url_midia = _pick_media_url(
             item.get("mediaUrl"),
             item.get("mediaLocalPath"),
@@ -2202,11 +2249,11 @@ def anexar_transcricoes_threaded(
 
         if url_midia:
             key = (idx, url_midia)
-            if key not in seen:     # EVITA JOB DUPLICADO ✔
+            if key not in seen:
                 seen.add(key)
                 jobs.append((idx, url_midia))
         else:
-            # falta de mídia → marca erro, mas não quebra pipeline
+            # nada de mídia — marcar erro leve
             if item.get("transcricao") is None and item.get("framesDescricao") is None:
                 item["transcricao"] = None
                 item["transcricao_erro"] = "sem_media_url"
@@ -2215,49 +2262,115 @@ def anexar_transcricoes_threaded(
     if not jobs:
         return resultados
 
-    # ==========================================================
-    # 🔹 Progresso seguro
-    # ==========================================================
+    # ----------------------------------------------------------------------
+    # 🔹 Progresso e timeout global
+    # ----------------------------------------------------------------------
     total = len(jobs)
     concluidos = 0
+    etapa_timeout_seg = 1800  # 30 min
+    etapa_deadline = time.time() + etapa_timeout_seg
 
-    # ==========================================================
-    # 🔹 Executor de threads
-    # ==========================================================
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    # timeout máximo por worker
+    worker_timeout_seg = 180  # 3 min por vídeo
 
-        futs = [
-            ex.submit(_thread_worker, idx, url, None)
-            for idx, url in jobs
-        ]
+    # ----------------------------------------------------------------------
+    # 🔹 Helper para matar ffmpeg zumbis
+    # ----------------------------------------------------------------------
+    def _kill_ffmpeg_children():
+        try:
+            import psutil
+        except ImportError:
+            tlog("[CLEANUP] psutil não instalado; não é possível matar ffmpeg zumbi.")
+            return
 
-        for fut in as_completed(futs, timeout=100):
+        try:
+            for p in psutil.process_iter(["name"]):
+                try:
+                    name = (p.info.get("name") or "").lower()
+                    if "ffmpeg" in name:
+                        tlog(f"[CLEANUP] Matando processo ffmpeg PID={p.pid}")
+                        p.kill()
+                except Exception:
+                    # ignora erros ao inspecionar/kill individual
+                    pass
+        except Exception as e:
+            tlog(f"[CLEANUP] Falha ao iterar processos ffmpeg: {e}")
+
+    # ----------------------------------------------------------------------
+    # 🔹 Criar executor manual (sem "with")
+    # ----------------------------------------------------------------------
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+
+    try:
+        futs = []
+        fut_to_idx: Dict[Any, int] = {}
+
+        # Submeter jobs
+        for idx, url in jobs:
+            fut = ex.submit(_thread_worker, idx, url)
+            futs.append(fut)
+            fut_to_idx[fut] = idx
+
+        # Processar conforme finalizam
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        for fut in as_completed(futs):
+
+            # ⏰ timeout global da etapa
+            if time.time() > etapa_deadline:
+                tlog("[ERRO] ⛔ Timeout global. Cancelando threads restantes.")
+                for f in futs:
+                    f.cancel()
+                break
+
+            try:
+                # timeout por worker
+                result = fut.result(timeout=worker_timeout_seg)
+            except FuturesTimeoutError:
+                idx_timeout = fut_to_idx.get(fut)
+                tlog(
+                    f"[TIMEOUT] Worker idx={idx_timeout} excedeu "
+                    f"{worker_timeout_seg}s. Cancelando futuro."
+                )
+                fut.cancel()
+
+                if (
+                    idx_timeout is not None
+                    and 0 <= idx_timeout < len(resultados)
+                    and isinstance(resultados[idx_timeout], dict)
+                ):
+                    item_to = resultados[idx_timeout]
+                    item_to["transcricao"] = None
+                    item_to["framesDescricao"] = None
+                    item_to["transcricao_erro"] = "worker_timeout"
+
+                continue
+
+            except Exception as e:
+                tlog(f"[TR] [ERRO] Worker explodiu antes de retornar: {e}")
+                continue
+
+            # Se chegamos aqui, o worker retornou normalmente
             try:
                 (
                     idx,
                     transcricao,
-                    frames,
                     frames_desc,
                     ai_model_data,
                     erro,
-                ) = fut.result()
-            except TimeoutError:
-                tlog("[ERRO] Uma thread travou! Cancelando executor.")
-                for f in futs:
-                    f.cancel()
-                break
+                ) = result
             except Exception as e:
-                tlog(f"[TR] [ERRO] Worker explodiu: {e}")
+                tlog(f"[TR] [ERRO] Resultado inesperado do worker: {e} | result={result}")
                 continue
 
-            # 🔒 SLAM DUNK PROTECTION: impede que idx inválido cause NoneType
+            # proteger índice inválido
             if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
-                tlog(f"[ERRO] Worker retornou idx inválido: idx={idx}")
+                tlog(f"[ERRO] idx inválido retornado: {idx}")
                 continue
 
             item = resultados[idx]
             if not isinstance(item, dict):
-                tlog(f"[ERRO] resultados[{idx}] corrompido (não-dict). Recriando estrutura mínima.")
+                tlog(f"[ERRO] resultados[{idx}] corrompido. Normalizando.")
                 resultados[idx] = {
                     "transcricao": None,
                     "framesDescricao": None,
@@ -2267,13 +2380,9 @@ def anexar_transcricoes_threaded(
                 }
                 item = resultados[idx]
 
-            # ----------------------------
-            # preencher resultados[idx]
-            # ----------------------------
+            # preencher dados
             if transcricao is not None:
                 item["transcricao"] = transcricao
-
-            # não guardamos base64Frames (memory-safe)
             if frames_desc is not None:
                 item["framesDescricao"] = frames_desc
 
@@ -2291,9 +2400,7 @@ def anexar_transcricoes_threaded(
             else:
                 item.pop("transcricao_erro", None)
 
-            # ----------------------------
-            # progresso do callback
-            # ----------------------------
+            # progresso
             concluidos += 1
             if callback:
                 try:
@@ -2301,43 +2408,46 @@ def anexar_transcricoes_threaded(
                 except Exception as e:
                     tlog(f"[CALLBACK] ⚠️ erro no callback: {e}")
 
-    # ==========================================================
-    # 🔹 Garantia de estrutura após processamento
-    # ==========================================================
+    finally:
+        # ------------------------------------------------------------------
+        # 🔥 FINALIZA TODAS AS THREADS (ELIMINA THREAD LEAKS)
+        # ------------------------------------------------------------------
+        ex.shutdown(wait=False, cancel_futures=True)
+        tlog("[CLEANUP] 🔚 Executor de transcrição finalizado corretamente.")
+
+        # mata possíveis ffmpeg zumbis
+        _kill_ffmpeg_children()
+
+    # ----------------------------------------------------------------------
+    # 🔹 Normalização final — garantir estrutura válida
+    # ----------------------------------------------------------------------
     for i in range(len(resultados)):
         item = resultados[i]
 
-        # Se o item não é dict, cria um dict mínimo e normaliza
         if not isinstance(item, dict):
-            tlog(f"[ERRO] resultados[{i}] inválido (None/não-dict). Normalizando para estrutura mínima.")
             resultados[i] = {
                 "transcricao": None,
                 "framesDescricao": None,
-                "transcricao_erro": "item_invalido",
+                "transcricao_erro": "item_invalido_final",
                 "ai_model_data": {},
                 "base64Frames": [],
             }
             continue
 
-        # Campos básicos
         item.setdefault("transcricao", None)
         item.setdefault("framesDescricao", None)
         item.setdefault("transcricao_erro", None)
 
-        # Força base64Frames como lista vazia (zero RAM)
+        # limpar base64 sempre
         bf = item.get("base64Frames")
         if not isinstance(bf, list) or bf:
-            tlog(f"[WARN] resultados[{i}].base64Frames estava preenchido ou inválido. Resetando para [].")
             item["base64Frames"] = []
 
-        # ai_model_data robusto
         amd = item.get("ai_model_data")
         if amd is None or not isinstance(amd, dict):
-            tlog(f"[WARN] resultados[{i}].ai_model_data inválido ({type(amd)}). Recriando dict vazio.")
             amd = {}
             item["ai_model_data"] = amd
 
-        # Normalização do conteúdo interno
         amd.setdefault("ai_model", "gpt-5-nano")
         amd.setdefault("input_tokens", None)
         amd.setdefault("output_tokens", None)
@@ -2349,38 +2459,34 @@ def anexar_transcricoes_threaded(
 
 def anexar_analises_threaded(
     resultados: List[Dict[str, Any]],
-    max_workers: int = 4,
+    max_workers: int = 1,
     callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Para cada item, gera a análise estruturada (usando analyze_post) em paralelo.
-    Campos preenchidos em cada item:
-      - analise: texto da análise em markdown
-      - analise_tokens: total de tokens usados na chamada
-      - analise_erro: mensagem de erro (se houver)
-    """
+
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
     if not resultados:
         return resultados
 
-    # ==========================
-    # Garantir dicts válidos
-    # ==========================
+    # ---------------------------------------------------------------------
+    # Validar estrutura
+    # ---------------------------------------------------------------------
     for i, item in enumerate(resultados):
         if not isinstance(item, dict):
-            tlog(f"[ANALISE] [ERRO] resultados[{i}] não é dict. Substituindo por dict vazio.")
             resultados[i] = {}
+            tlog(f"[ANALISE] [ERRO] resultados[{i}] não era dict. Corrigido.")
 
-    # ==========================
-    # Selecionar jobs a analisar
-    # ==========================
-    jobs: List[int] = []
+    # ---------------------------------------------------------------------
+    # Criar lista de jobs
+    # ---------------------------------------------------------------------
+    jobs = []
     for idx, item in enumerate(resultados):
 
         if not isinstance(item, dict):
             continue
 
-        # Se já veio do Mongo com análise, pula
+        # Se já veio com análise do Mongo, pula
         if item.get("_from_mongo") and item.get("analise"):
             continue
 
@@ -2389,7 +2495,6 @@ def anexar_analises_threaded(
         frames_desc = item.get("framesDescricao") or ""
 
         if not (caption or transcricao or frames_desc):
-            # nada pra analisar
             if item.get("analise") is None and item.get("analise_erro") is None:
                 item["analise"] = None
                 item["analise_tokens"] = 0
@@ -2404,19 +2509,23 @@ def anexar_analises_threaded(
 
     total = len(jobs)
     concluidos = 0
-
     tlog(f"[ANALISE] Iniciando geração de análises para {total} item(ns)...")
 
-    # ==========================
-    # Worker executado em threads
-    # ==========================
+    # ---------------------------------------------------------------------
+    # Configurar timeouts
+    # ---------------------------------------------------------------------
+    etapa_timeout_seg = 1800  # 30 min
+    worker_timeout_seg = 120   # 2 min por análise
+    etapa_deadline = time.time() + etapa_timeout_seg
+
+    # ---------------------------------------------------------------------
+    # Worker
+    # ---------------------------------------------------------------------
     def _thread_analise(idx: int):
         if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
             return idx, None, 0, "idx_invalido"
 
         item = resultados[idx]
-        if not isinstance(item, dict):
-            return idx, None, 0, "item_invalido"
 
         row = {
             "ownerUsername": item.get("ownerUsername") or item.get("creatorname") or "",
@@ -2426,8 +2535,8 @@ def anexar_analises_threaded(
         }
 
         try:
-            result = analyze_post(row)          # <- chama a função
-            texto = result["analise"]           # <- lê as chaves corretas
+            result = analyze_post(row)
+            texto = result["analise"]
             tokens = result["tokens_total"]
             erro = None
         except Exception as e:
@@ -2437,53 +2546,93 @@ def anexar_analises_threaded(
 
         return idx, texto, tokens, erro
 
-    # ==========================
-    # Executor
-    # ==========================
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_thread_analise, idx) for idx in jobs]
+    # ---------------------------------------------------------------------
+    # Executor manual
+    # ---------------------------------------------------------------------
+    ex = ThreadPoolExecutor(max_workers=max_workers)
 
-        for fut in as_completed(futures):
+    try:
+
+        futs = []
+        fut_to_idx = {}
+
+        # Submeter
+        for idx in jobs:
+            fut = ex.submit(_thread_analise, idx)
+            futs.append(fut)
+            fut_to_idx[fut] = idx
+
+        # Processar
+        for fut in as_completed(futs):
+
+            # Timeout geral
+            if time.time() > etapa_deadline:
+                tlog("[ANALISE] ⛔ Timeout global. Cancelando tudo.")
+                for f in futs:
+                    f.cancel()
+                break
+
             try:
-                idx, texto, tokens, erro = fut.result()
+                result = fut.result(timeout=worker_timeout_seg)
+
+            except FuturesTimeoutError:
+                idx_timeout = fut_to_idx.get(fut)
+                tlog(f"[ANALISE] [TIMEOUT] idx={idx_timeout} travou > {worker_timeout_seg}s.")
+
+                if idx_timeout is not None:
+                    item = resultados[idx_timeout]
+                    item["analise"] = None
+                    item["analise_tokens"] = 0
+                    item["analise_erro"] = "worker_timeout"
+
+                fut.cancel()
+                continue
+
             except Exception as e:
-                tlog(f"[ANALISE] [ERRO] Worker explodiu: {e}")
+                idx_exc = fut_to_idx.get(fut)
+                tlog(f"[ANALISE] [ERRO] Worker idx={idx_exc} explodiu: {e}")
                 continue
 
-            if not isinstance(idx, int) or idx < 0 or idx >= len(resultados):
-                tlog(f"[ANALISE] [ERRO] Worker retornou idx inválido ou item None: idx={idx}")
+            # unpack
+            idx_res, texto, tokens, erro = result
+
+            if not isinstance(idx_res, int) or idx_res < 0 or idx_res >= len(resultados):
+                tlog(f"[ANALISE] [ERRO] idx inválido retornado pelo worker: {idx_res}")
                 continue
 
-            item = resultados[idx]
+            item = resultados[idx_res]
+
             if not isinstance(item, dict):
-                tlog(f"[ANALISE] [ERRO] resultados[{idx}] virou None ou não-dict. Normalizando.")
-                resultados[idx] = {
+                resultados[idx_res] = {
                     "analise": None,
                     "analise_tokens": 0,
                     "analise_erro": "item_invalido",
                 }
-                item = resultados[idx]
+                item = resultados[idx_res]
 
             item["analise"] = texto
             item["analise_tokens"] = tokens
             item["analise_erro"] = erro
 
             concluidos += 1
+
             if callback:
                 try:
                     callback(concluidos, total)
                 except Exception as e:
-                    tlog(f"[ANALISE] [CALLBACK] ⚠️ erro no callback: {e}")
+                    tlog(f"[ANALISE] [CALLBACK ERRO] {e}")
 
-    # ==========================
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+        tlog("[ANALISE] 🔚 Executor finalizado.")
+
     # Normalização final
-    # ==========================
     for i, item in enumerate(resultados):
         if not isinstance(item, dict):
             resultados[i] = {
                 "analise": None,
                 "analise_tokens": 0,
-                "analise_erro": "item_invalido_pos_analise",
+                "analise_erro": "item_invalido_final",
             }
             continue
 
@@ -2491,7 +2640,7 @@ def anexar_analises_threaded(
         item.setdefault("analise_tokens", 0)
         item.setdefault("analise_erro", None)
 
-    tlog(f"[ANALISE] ✅ Concluído: {total} análises geradas.")
+    tlog(f"[ANALISE] ✔ Concluídas {concluidos}/{total} análises.")
     return resultados
 
 def gerar_embeddings(resultados: List[dict], model: str = "text-embedding-3-small", batch_size: int = 100) -> List[dict]:
@@ -2949,141 +3098,206 @@ async def fetch_social_post_summary_async(
     
     return results
 
-async def rodar_pipeline(urls: List[str], progress_callback=None) -> List[dict]:
+async def process_item_end_to_end(
+    item: dict,
+    semaphore: asyncio.Semaphore,
+    run_analysis: bool,
+    progress_callback=None
+):
+    """
+    Processa um único item do início ao fim:
+    1. Transcrição (se vídeo)
+    2. Análise (opcional)
+    3. Embeddings
+    4. Classificação
+    5. Upload Mongo
+    6. Limpeza local
+    """
+    async with semaphore:
+        try:
+            # -------------------------------------------------
+            # 1. Transcrição / Extração de Frames
+            # -------------------------------------------------
+            # Simula o comportamento de anexar_transcricoes_threaded mas para 1 item
+            # Precisamos rodar _thread_worker em thread pool para não bloquear loop
+            
+            url_midia = _pick_media_url(
+                item.get("mediaUrl"),
+                item.get("mediaLocalPath"),
+                item.get("mediaLocalPaths"),
+            )
+            
+            # Se já tem transcrição (ex: veio do mongo), pula
+            if not (item.get("_from_mongo") and (item.get("transcricao") or item.get("framesDescricao"))):
+                if url_midia:
+                    # Executa worker em thread separada
+                    loop = asyncio.get_running_loop()
+                    # idx=0 pois é um item só
+                    result = await loop.run_in_executor(None, _thread_worker, 0, url_midia)
+                    
+                    # Unpack result
+                    _, transcricao, frames_desc, ai_model_data, erro = result
+                    
+                    if transcricao: item["transcricao"] = transcricao
+                    if frames_desc: item["framesDescricao"] = frames_desc
+                    if erro: item["transcricao_erro"] = erro
+                    
+                    item["ai_model_data"] = ai_model_data or {}
+                else:
+                    if not item.get("transcricao") and not item.get("framesDescricao"):
+                        item["transcricao_erro"] = "sem_media_url"
+
+            # -------------------------------------------------
+            # 2. Análise (Opcional)
+            # -------------------------------------------------
+            if run_analysis:
+                # Se já tem análise (ex: veio do mongo), pula
+                if not (item.get("_from_mongo") and item.get("analise")):
+                    # Verifica se tem conteúdo para analisar
+                    has_content = item.get("caption") or item.get("transcricao") or item.get("framesDescricao")
+                    
+                    if has_content:
+                        # Prepara payload para analyze_post
+                        row = {
+                            "ownerUsername": item.get("ownerUsername") or item.get("creatorname") or "",
+                            "caption": item.get("caption") or "",
+                            "transcricao": item.get("transcricao") or "",
+                            "framesDescricao": item.get("framesDescricao") or "",
+                        }
+                        
+                        try:
+                            loop = asyncio.get_running_loop()
+                            # analyze_post é síncrono (retry/requests), rodar em executor
+                            res_analise = await loop.run_in_executor(None, analyze_post, row)
+                            item["analise"] = res_analise["analise"]
+                            item["analise_tokens"] = res_analise["tokens_total"]
+                        except Exception as e:
+                            item["analise_erro"] = str(e)
+                    else:
+                        item["analise_erro"] = "sem_texto_para_analisar"
+
+            # -------------------------------------------------
+            # 3. Embeddings
+            # -------------------------------------------------
+            # gerar_embeddings espera lista, passamos [item]
+            # Ela modifica o item in-place
+            # É síncrona (requests), rodar em executor
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, gerar_embeddings, [item])
+
+            # -------------------------------------------------
+            # 4. Classificação
+            # -------------------------------------------------
+            # classificar_via_mongo_vector_search espera lista
+            # É síncrona (mongo), rodar em executor
+            await loop.run_in_executor(None, classificar_via_mongo_vector_search, [item])
+
+            # -------------------------------------------------
+            # 5. Upload Mongo
+            # -------------------------------------------------
+            sanitize_and_upload_single(item)
+
+        except Exception as e:
+            tlog(f"[ITEM ERROR] Falha processando {item.get('url')}: {e}")
+            item["processing_error"] = str(e)
+
+        finally:
+            # -------------------------------------------------
+            # 6. Limpeza Local Imediata
+            # -------------------------------------------------
+            caminhos = _coletar_caminhos_midia([item])
+            _deletar_arquivos(caminhos)
+            
+            if progress_callback:
+                progress_callback()
+
+def sanitize_and_upload_single(item: dict):
+    """
+    Sanitiza e faz upload de um único item para o MongoDB.
+    Réplica da lógica de _sanitize_items do main.py + _upload_para_mongo.
+    """
+    try:
+        # Verifica erro de transcrição que impeça upload?
+        # No main.py: if not erro: upload.
+        # Aqui vamos seguir a mesma lógica.
+        
+        erro = item.get("transcricao_erro")
+        if erro and erro not in ["sem_media_url", "sem_texto_para_analisar"]: 
+             # "sem_media_url" as vezes é aceitável se for imagem? 
+             # O código original do main.py bloqueava qualquer "transcricao_erro" que não fosse None/False/Empty.
+             # Vamos manter conservador: se tem erro, loga e não sobe.
+             tlog(f"[UPLOAD] Ignorando item {item.get('url')} com erro: {erro}")
+             return
+
+        # Campos permitidos (copiado do main.py)
+        allowed_fields = {
+            "url", "ownerUsername", "caption", "type", "likesCount", "commentsCount",
+            "videoPlayCount", "videoViewCount", "transcricao", "framesDescricao",
+            "audio_id", "audio_snapshot", "hashtags", "mentions", "ai_model_data",
+            "embedding", "categoria_principal", "subcategoria", "comunidade_predita",
+            "comunidades_proporcoes", "analise", "analise_tokens", "analise_erro"
+        }
+        
+        item_para_upload = {k: item.get(k) for k in allowed_fields}
+        
+        # Timestamps
+        item_para_upload["post_timestamp"] = item.get("timestamp") or item.get("post_timestamp")
+        item_para_upload["upload_timestamp"] = datetime.now()
+        
+        # Upload
+        _upload_para_mongo(item_para_upload)
+        
+    except Exception as e:
+        tlog(f"[UPLOAD ERROR] {e}")
+
+async def rodar_pipeline(urls: List[str], run_analysis: bool = True, progress_callback=None) -> List[dict]:
     """
     Executa o pipeline completo:
-    1) Busca posts
-    2) Transcreve e extrai frames
-    3) Gera embeddings
-    4) Classifica via Mongo Vector Search
-    5) Limpa mídia temporária
+    1) Busca posts (todos de uma vez - APIfy é rápido e eficiente em batch)
+    2) Processa cada item end-to-end com concorrência limitada (4)
     """
-    tlog("[PIPELINE] Iniciando rodar_pipeline()")
+    tlog(f"[PIPELINE] Iniciando rodar_pipeline(run_analysis={run_analysis})")
     if not urls:
         print("Nenhuma URL fornecida.")
         return []
 
-    total_steps = 5
-    step = 0
-    final_results: List[dict] = []
-
-        # --- função auxiliar para reportar progresso normalizado ---
-    def _safe_progress(percent: float, msg: str = ""):
-        """Garante que o valor do progresso fique entre 0 e 100 e captura erros do Streamlit."""
-        if not progress_callback:
-            return
-        try:
-            percent = max(0.0, min(1.0, percent)) # mantém entre 0 e 1
-            progress_callback(round(percent, 2), msg) # envia 0–100%
-        except Exception as e:
-            print(f"[Aviso] progress_callback falhou: {e}")
+    # --- 1. Busca ---
+    if progress_callback: progress_callback(0.1, "🔍 Buscando posts...")
     
-    def update_step(msg):
-        nonlocal step
-        step += 1
-        _safe_progress(step / total_steps, msg)
-
-    try:
-        # ----------------------------
-        # 1️⃣ Buscar/baixar posts
-        # ----------------------------
-        update_step("🔍 Buscando e baixando posts...")
-        resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=10000)
-        final_results = resultados # mantém a referência para limpeza no finally
-        if not resultados:
-            print("Nenhum resultado retornado pelos scrapers.")
-            return []
-
-        # ----------------------------
-        # 2️⃣ Transcrever e extrair frames
-        # ----------------------------
-        update_step("🎙️ Transcrevendo e extraindo frames...")
-
-        # FILTRO CRÍTICO (impede 'NoneType' mais tarde)
-        resultados = [r for r in resultados if isinstance(r, dict)]
-
-        total_videos = len([r for r in resultados if r.get('mediaLocalPath')])
-        progresso_local = 0
-
-        def local_progress(concluidos=None, total=None):
-            nonlocal progresso_local
-            progresso_local += 1
-            # calcula progresso relativo (0–100) dentro desta etapa
-            progresso_total = (step + (progresso_local / max(1, total_videos))) / total_steps
-            _safe_progress(progresso_total, f"🎧 Transcrevendo vídeos ({progresso_local}/{total_videos})...")
-
-        tlog(f"[PIPELINE] Chamando anexar_transcricoes_threaded() com {len(resultados)} posts")
-        tlog("Checando resultados malformados...")
-        for i, r in enumerate(resultados):
-            if r is None:
-                tlog(f"[ERRO] resultados[{i}] == None")
-            elif not isinstance(r, dict):
-                tlog(f"[ERRO] resultados[{i}] NÃO É dict: {type(r)}")
-
-        
-        anexar_transcricoes_threaded(resultados, max_workers=max_workers, gpu_singleton=False, callback=local_progress)
-        tlog("[PIPELINE] Finalizou anexar_transcricoes_threaded()")
-
-        # --- FILTRO CRÍTICO APÓS A TRANSCRIÇÃO ---
-        # Em alguns casos, uma thread pode retornar None e sobrescrever um item da lista.
-        # Isso evita que gerar_embeddings() ou classificar_via_mongo_vector_search() quebrem.
-        posts_iniciais = len(resultados)
-        resultados = [r for r in resultados if isinstance(r, dict)]
-        filtrados = posts_iniciais - len(resultados)
-        if filtrados > 0:
-            tlog(f"[WARN] Removidos {filtrados} itens inválidos (None ou não-dict) após transcrição.")
-
-        # ----------------------------
-        # 2️⃣.5️ Gerar ANÁLISE GPT para cada post
-        # ----------------------------
-        tlog("[PIPELINE] Iniciando anexar_analises_threaded()...")
-
-        def local_progress_analise(concluidos, total):
-            # progresso dentro desta etapa, análogo ao da transcrição
-            progresso_total = (step + (concluidos / max(1, total))) / total_steps
-            _safe_progress(progresso_total, f"📝 Analisando posts ({concluidos}/{total})...")
-
-        anexar_analises_threaded(
-            resultados,
-            max_workers=max_workers,
-            callback=local_progress_analise,
-        )
-        tlog("[PIPELINE] Finalizou anexar_analises_threaded()")
-
-        # ----------------------------
-        # 3️⃣ Gerar embeddings
-        # ----------------------------
-        update_step("🧠 Gerando embeddings...")
-        resultados = gerar_embeddings(resultados)
-
-        # ----------------------------
-        # 4️⃣ Classificar via Mongo Vector Search
-        # ----------------------------
-        update_step("🏷️ Classificando resultados...")
-        resultados = classificar_via_mongo_vector_search(resultados, k=5)
-
-        # ----------------------------
-        # 5️⃣ Limpar arquivos temporários
-        # ----------------------------
-        update_step("🧹 Limpando diretórios temporários...")
-        caminhos = _coletar_caminhos_midia(resultados)
-        _deletar_arquivos(caminhos)
-        _deletar_pasta_se_vazia(Path(media))
-        _deletar_pasta_se_vazia(Path(BASE_DIR) / "tmp")
-
-        _safe_progress(1.0, "✅ Finalizado com sucesso!")
-        return resultados
+    resultados = await fetch_social_post_summary_async(urls, api_token=None, max_results=10000)
     
-    except Exception as pipeline_error:
-        tlog(f"[ERROR] ❌ Erro fatal no pipeline: {pipeline_error}")
-        # Garante a limpeza mesmo em caso de erro
-        try:
-            tlog("[PIPELINE] Tentando limpeza de emergência...")
-            caminhos = _coletar_caminhos_midia(final_results)
-            _deletar_arquivos(caminhos)
-            _deletar_pasta_se_vazia(Path(media))
-            _deletar_pasta_se_vazia(Path(BASE_DIR) / "tmp")
-            tlog("[PIPELINE] Limpeza de emergência concluída.")
-        except Exception as cleanup_error:
-             tlog(f"[ERROR] Falha na limpeza de emergência: {cleanup_error}")
-        raise # relança o erro original
+    if not resultados:
+        print("Nenhum resultado retornado pelos scrapers.")
+        return []
+
+    # Filtra inválidos
+    resultados = [r for r in resultados if isinstance(r, dict)]
+    total_items = len(resultados)
+    
+    # --- 2. Processamento Concorrente ---
+    # Limita a 4 simultâneos para economizar CPU/RAM no processamento pesado
+    sem = asyncio.Semaphore(4)
+    
+    completed_count = 0
+    
+    def item_done_callback():
+        nonlocal completed_count
+        completed_count += 1
+        pct = 0.1 + (0.9 * (completed_count / total_items))
+        if progress_callback:
+            progress_callback(round(pct, 2), f"Processando vídeos ({completed_count}/{total_items})...")
+
+    tasks = []
+    for item in resultados:
+        tasks.append(process_item_end_to_end(item, sem, run_analysis, item_done_callback))
+    
+    if progress_callback: progress_callback(0.1, f"Iniciando processamento de {total_items} itens...")
+    
+    await asyncio.gather(*tasks)
+    
+    # Limpeza final de pastas (caso tenha sobrado algo órfão)
+    _deletar_pasta_se_vazia(Path(media))
+    _deletar_pasta_se_vazia(Path(BASE_DIR) / "tmp")
+
+    if progress_callback: progress_callback(1.0, "✅ Finalizado!")
+    return resultados
