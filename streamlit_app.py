@@ -1,12 +1,12 @@
-import io
-import time
-from contextlib import redirect_stdout, redirect_stderr
-from importlib import import_module
-from urllib.parse import urlparse
-from datetime import datetime
-import streamlit as st
+import io 
+import time 
+from contextlib import redirect_stdout, redirect_stderr 
+from importlib import import_module 
+from urllib.parse import urlparse 
+from datetime import datetime 
+import streamlit as st 
 
-from main import main   # sua função principal
+from main import main  # sua função principal
 
 # ----------------------------
 # Configurações
@@ -14,7 +14,7 @@ from main import main   # sua função principal
 VALID_DOMAINS = {
     "instagram.com", "www.instagram.com", "m.instagram.com",
     "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
-    "vt.tiktok.com", "static-resources"
+    "vt.tiktok.com", "static-resources",
 }
 
 # ----------------------------
@@ -34,10 +34,12 @@ def is_supported_url(u: str) -> bool:
     except Exception:
         return False
 
+
 def normalize_url(u: str) -> str:
     if not u:
         return ""
     return u if u.startswith(("http://", "https://")) else "https://" + u.strip()
+
 
 def parse_urls(raw_text: str):
     lines = [normalize_url(line.strip()) for line in (raw_text or "").splitlines()]
@@ -52,26 +54,19 @@ def parse_urls(raw_text: str):
 # ----------------------------
 # Session state seguro
 # ----------------------------
-if "running" not in st.session_state:
-    st.session_state.running = False
+defaults = {
+    "running": False,
+    "result": None,
+    "stdout": "",
+    "stderr": "",
+    "start_time": None,
+    "progress_ratio": 0.0,
+    "progress_message": "---",
+}
 
-if "result" not in st.session_state:
-    st.session_state.result = None
-
-if "stdout" not in st.session_state:
-    st.session_state.stdout = ""
-
-if "stderr" not in st.session_state:
-    st.session_state.stderr = ""
-
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-
-if "progress_ratio" not in st.session_state:
-    st.session_state.progress_ratio = 0.0
-
-if "progress_message" not in st.session_state:
-    st.session_state.progress_message = "---"
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 
 # ----------------------------
@@ -81,15 +76,15 @@ st.set_page_config(page_title="Fetcher IG/TikTok", page_icon="🔗", layout="cen
 st.title("🔗 Processar publicações do Instagram e TikTok")
 
 st.caption(
-    "Cole **uma URL por linha** ou envie um arquivo `.txt`. "
+    "Cole **uma URL por linha** ou envie um arquivo .txt. "
     "Geraremos um arquivo Excel (.xlsx) para download."
 )
 
 with st.expander("Como usar", expanded=False):
     st.markdown("""
     - Cole **uma URL por linha**.  
-    - Suportados: **instagram.com**, **tiktok.com** (inclusive encurtadores).  
-    - Ao finalizar, um **arquivo Excel (.xlsx)** será disponibilizado.
+    - Suportados: **instagram.com**, **tiktok.com**.  
+    - Ao finalizar, um **arquivo Excel** estará disponível.
     """)
 
 # Inputs
@@ -100,6 +95,7 @@ with col1:
         height=180,
         placeholder="https://www.instagram.com/p/...\nhttps://www.tiktok.com/@user/video/..."
     )
+
 with col2:
     uploaded = st.file_uploader("Ou envie um arquivo .txt", type=["txt"])
     if uploaded:
@@ -115,13 +111,15 @@ if raw:
         with st.expander("Ver URLs", expanded=False):
             st.text("\n".join(urls))
     else:
-        st.warning("Nenhuma URL válida na sua lista.")
+        st.warning("Nenhuma URL válida detectada.")
 
 st.divider()
 
 # ----------------------------
 # Botão para iniciar pipeline
 # ----------------------------
+run_analysis = st.checkbox("Executar Análise GPT (custo extra)", value=True, key="run_analysis")
+
 if st.button("▶️ Executar pipeline e gerar Excel", disabled=not urls, type="primary"):
     st.session_state.running = True
     st.session_state.result = None
@@ -134,19 +132,24 @@ if st.button("▶️ Executar pipeline e gerar Excel", disabled=not urls, type="
 
 
 # ============================================================
-#                EXECUÇÃO DO PIPELINE (SEGURO)
+# EXECUÇÃO DO PIPELINE (SEGURO)
 # ============================================================
 if st.session_state.running:
 
-    st.info("⏳ Pipeline iniciado. Não feche a página.")
+    st.info("⏳ Pipeline iniciado. Não feche ou recarregue a página.")
 
-    # Elementos da barra de progresso
+    # Barra de progresso
     progress_bar = st.progress(0)
     progress_text = st.empty()
     eta_text = st.empty()
 
-    # buffer logs
-    out_buf, err_buf = io.StringIO(), io.StringIO()
+    # LOGS em tempo real
+    live_logs = st.container()
+    live_logs.markdown("### 🪵 Logs em tempo real")
+    live_log_box = live_logs.empty()
+
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
 
     # --------------------------------------
     # CALLBACK: Atualiza barra + ETA
@@ -155,29 +158,32 @@ if st.session_state.running:
         st.session_state.progress_ratio = max(0.0, min(1.0, float(ratio)))
         st.session_state.progress_message = message
 
-        # Atualiza UI
         percent = int(st.session_state.progress_ratio * 100)
         progress_bar.progress(percent)
         progress_text.write(f"**{percent}% — {message}**")
 
-        # Estimar ETA
         elapsed = time.time() - st.session_state.start_time
         if ratio > 0:
             total_est = elapsed / ratio
             remaining = total_est - elapsed
             if remaining > 0:
                 eta_text.write(
-                    f"⏱️ Tempo restante estimado: **{int(remaining//60)} min {int(remaining%60)} s**"
+                    f"⏱️ ETA: **{int(remaining//60)} min {int(remaining%60)} s**"
                 )
 
+        # 🔥 Atualizar logs ao vivo
+        live_log_box.code(out_buf.getvalue() + err_buf.getvalue(), language="bash")
+
     # --------------------------------------
-    # Execução
+    # Execução principal
+    # --------------------------------------
+    # --------------------------------------
+    # Execução principal
     # --------------------------------------
     try:
         with redirect_stdout(out_buf), redirect_stderr(err_buf):
-            result = main(urls, progress_callback=update_progress)
+            result = main(urls, run_analysis=st.session_state.get("run_analysis", True), progress_callback=update_progress)
 
-        # Finalização
         st.session_state.result = result
         st.session_state.stdout = out_buf.getvalue()
         st.session_state.stderr = err_buf.getvalue()
@@ -185,13 +191,14 @@ if st.session_state.running:
         st.rerun()
 
     except Exception as e:
-        st.session_state.stderr = f"[FATAL] {e}"
+        st.session_state.stderr = f"[FATAL] {e}\n\n{err_buf.getvalue()}"
+        st.session_state.stdout = out_buf.getvalue()
         st.session_state.running = False
         st.rerun()
 
 
 # ============================================================
-#                   EXIBIÇÃO DOS RESULTADOS
+# EXIBIÇÃO DOS RESULTADOS
 # ============================================================
 if st.session_state.result:
 
@@ -211,20 +218,12 @@ if st.session_state.result:
 
     # JSON result
     st.subheader("📄 Dados estruturados")
-    with st.expander("Ver JSON completo", expanded=False):
+    with st.expander("Ver JSON de exemplo", expanded=False):
         if "df" in result:
-            st.json(result["df"].to_dict(orient="records"))
+            records = result["df"].to_dict(orient="records")
+            st.json(records[0] if records else {})
         else:
             st.json(result)
-
-    # LOGS
-    if st.session_state.stdout:
-        with st.expander("🪵 Logs (stdout)"):
-            st.code(st.session_state.stdout)
-
-    if st.session_state.stderr:
-        with st.expander("⚠️ Erros/Alertas (stderr)"):
-            st.code(st.session_state.stderr)
 
     st.caption(
         f"Processadas {result.get('n_urls', 0)} URL(s). "
